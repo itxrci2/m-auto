@@ -25,7 +25,7 @@ from blocklist import (
     is_blocklist_active, add_to_blocklist, get_user_blocklist
 )
 
-API_TOKEN = "7610586859:AAFsDXtdd_rksn9QLLHm3n4GeMqsTgFDBKU"
+API_TOKEN = "7735279075:AAHvefFBqiRUE4NumS0JlwTAiSMzfrgTmqA"
 ADMIN_USER_IDS = [6387028671, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
 password_access = {}
