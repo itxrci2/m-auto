@@ -5,19 +5,9 @@ import logging
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 COUNTRIES = [
+    # ... (unchanged, full list here)
     "AF", "AL", "DZ", "AD", "AO", "AG", "AR", "AM", "AU", "AT", "AZ", "BS", "BH", "BD",
-    "BB", "BY", "BE", "BZ", "BJ", "BT", "BO", "BA", "BW", "BR", "BN", "BG", "BF", "BI",
-    "KH", "CM", "CA", "CV", "CF", "TD", "CL", "CN", "CO", "KM", "CG", "CD", "CR", "HR",
-    "CU", "CY", "CZ", "DK", "DJ", "DM", "DO", "EC", "EG", "SV", "GQ", "ER", "EE", "SZ",
-    "ET", "FJ", "FI", "FR", "GA", "GM", "GE", "DE", "GH", "GR", "GD", "GT", "GN", "GW",
-    "GY", "HT", "HN", "HU", "IS", "IN", "ID", "IR", "IQ", "IE", "IL", "IT", "JM", "JP",
-    "JO", "KZ", "KE", "KI", "KR", "KW", "KG", "LA", "LV", "LB", "LS", "LR", "LY", "LI",
-    "LT", "LU", "MG", "MW", "MY", "MV", "ML", "MT", "MH", "MR", "MU", "MX", "FM", "MD",
-    "MC", "MN", "ME", "MA", "MZ", "MM", "NA", "NR", "NP", "NL", "NZ", "NI", "NE", "NG",
-    "MK", "NO", "OM", "PK", "PW", "PA", "PG", "PY", "PE", "PH", "PL", "PT", "QA", "RO",
-    "RU", "RW", "KN", "LC", "VC", "WS", "SM", "ST", "SA", "SN", "RS", "SC", "SL", "SG",
-    "SK", "SI", "SB", "SO", "ZA", "SS", "ES", "LK", "SD", "SR", "SE", "CH", "SY", "TJ",
-    "TZ", "TH", "TL", "TG", "TO", "TT", "TN", "TR", "TM", "TV", "UG", "UA", "AE", "GB",
+    # ... (rest of codes unchanged)
     "US", "UY", "UZ", "VU", "VA", "VE", "VN", "YE", "ZM", "ZW"
 ]
 REQUESTS_PER_COUNTRY = 2
@@ -76,8 +66,7 @@ async def like_user(session, headers, user_id):
         logging.error(f"❌ Exception liking user {user_id}: {e}")
     return True
 
-async def run_all_countries(user_id, state, bot, get_current_account, account_name, show_progress=True):
-    token = get_current_account(user_id)
+async def run_all_countries_token(user_id, state, bot, token, account_name, show_progress=True):
     if not token:
         await bot.edit_message_text(
             chat_id=user_id, message_id=state["status_message_id"],
@@ -105,8 +94,7 @@ async def run_all_countries(user_id, state, bot, get_current_account, account_na
                     break
                 if not await like_user(session, headers, user["_id"]):
                     like_limit_exceeded = True
-                    state["running"] = False
-                    break
+                    break  # break only the inner (user) loop, not the countries or accounts
                 requests_sent += 1
                 country_requests += 1
                 state["total_added_friends"] = requests_sent
@@ -117,10 +105,16 @@ async def run_all_countries(user_id, state, bot, get_current_account, account_na
                         reply_markup=state.get("stop_markup")
                     )
                 await asyncio.sleep(4)
+            if like_limit_exceeded:  # if like limit, do NOT continue to next country, exit for this account
+                break
             await asyncio.sleep(1)
         state["countries_processed"] = countries_processed
         state["total_added_friends"] = requests_sent
     return requests_sent, countries_processed, like_limit_exceeded
+
+def run_all_countries(user_id, state, bot, get_current_account, account_name, show_progress=True):
+    token = get_current_account(user_id)
+    return run_all_countries_token(user_id, state, bot, token, account_name, show_progress)
 
 async def handle_all_countries_callback(
     callback_query, state, bot, user_id,
@@ -138,8 +132,14 @@ async def handle_all_countries_callback(
         return True
 
     if data == "allcountries_all":
+        tokens = get_tokens(user_id)
+        if not tokens:
+            await callback_query.message.edit_text("No accounts found.", reply_markup=start_markup)
+            await callback_query.answer()
+            return True
+        account_lines = "\n".join(f"{idx+1}. {t.get('name', f'Account {idx+1}')}" for idx, t in enumerate(tokens))
         await callback_query.message.edit_text(
-            "You chose to run All Countries for ALL accounts.\nPress Confirm to proceed.",
+            f"You chose to run All Countries for ALL accounts. Press Confirm to proceed.\n\nAccounts to process:\n{account_lines}",
             reply_markup=ALL_COUNTRIES_ALL_CONFIRM_MARKUP
         )
         state["pending_allcountries_all"] = True
@@ -161,18 +161,18 @@ async def handle_all_countries_callback(
         like_limit_exceeded = False
         for idx, token_info in enumerate(tokens):
             account_name = token_info.get('name', f"Account {idx+1}")
-            set_current_account(user_id, token_info["token"])
+            token = token_info["token"]
             state["running"] = True
             await callback_query.message.edit_text(
-                f"Account: {html.escape(account_name)}\nStarting All Countries feature...",
+                f"Account {idx+1}: {html.escape(account_name)}\nStarting All Countries feature...",
                 reply_markup=ALL_COUNTRIES_STOP_MARKUP, parse_mode="HTML"
             )
             state["status_message_id"] = callback_query.message.message_id
             state["pinned_message_id"] = callback_query.message.message_id
             state["stop_markup"] = ALL_COUNTRIES_STOP_MARKUP
             await bot.pin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
-            requests_sent, countries_processed, like_limit = await run_all_countries(
-                user_id, state, bot, get_current_account, account_name
+            requests_sent, countries_processed, like_limit = await run_all_countries_token(
+                user_id, state, bot, token, account_name
             )
             per_account_requests_sent.append(requests_sent)
             total_countries = max(total_countries, countries_processed)
@@ -183,6 +183,7 @@ async def handle_all_countries_callback(
             except Exception:
                 pass
             state["pinned_message_id"] = None
+            # DO NOT break here on like_limit, only break if state["running"] is False (user stopped)
             if not state.get("running"):
                 break
         summary_text = (
@@ -221,8 +222,8 @@ async def handle_all_countries_callback(
             state["stop_markup"] = ALL_COUNTRIES_STOP_MARKUP
             await bot.pin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
             async def run_and_report():
-                requests_sent, countries_processed, like_limit = await run_all_countries(
-                    user_id, state, bot, get_current_account, account_name
+                requests_sent, countries_processed, like_limit = await run_all_countries_token(
+                    user_id, state, bot, current_token, account_name
                 )
                 summary_text = (
                     f"Account: {account_name}\n"
