@@ -3,6 +3,10 @@ import aiohttp
 import html
 import logging
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+from blocklist import is_blocklist_active, add_to_blocklist, get_user_blocklist
+from dateutil import parser
+from datetime import datetime, timezone
 
 COUNTRIES = [
     "AF", "AX", "AL", "DZ", "AS", "AD", "AO", "AI", "AQ", "AG", "AR", "AM", "AW", "AU", "AT", "AZ",
@@ -41,8 +45,84 @@ ALL_COUNTRIES_ALL_CONFIRM_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Cancel", callback_data="allcountries_cancel")]
 ])
 ALL_COUNTRIES_STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Stop", callback_data="stop")]
+    [InlineKeyboardButton(text="Stop Requests", callback_data="stop")]
 ])
+
+def format_time_used(start_time, end_time):
+    delta = end_time - start_time
+    total_seconds = int(delta.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {seconds}s"
+    elif minutes > 0:
+        return f"{minutes}m {seconds}s"
+    else:
+        return f"{seconds}s"
+
+def format_user(user):
+    def time_ago(dt_str):
+        if not dt_str:
+            return "N/A"
+        try:
+            dt = parser.isoparse(dt_str)
+            now = datetime.now(timezone.utc)
+            diff = now - dt
+            minutes = int(diff.total_seconds() // 60)
+            if minutes < 1:
+                return "just now"
+            elif minutes < 60:
+                return f"{minutes} min ago"
+            hours = minutes // 60
+            if hours < 24:
+                return f"{hours} hr ago"
+            days = hours // 24
+            return f"{days} day(s) ago"
+        except Exception:
+            return "unknown"
+    last_active = time_ago(user.get("recentAt"))
+    return (
+        f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
+        f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
+        f"<b>Description:</b> {html.escape(user.get('description', 'N/A'))}\n"
+        f"<b>Birth Year:</b> {html.escape(str(user.get('birthYear', 'N/A')))}\n"
+        f"<b>Platform:</b> {html.escape(user.get('platform', 'N/A'))}\n"
+        f"<b>Profile Score:</b> {html.escape(str(user.get('profileScore', 'N/A')))}\n"
+        f"<b>Distance:</b> {html.escape(str(user.get('distance', 'N/A')))} km\n"
+        f"<b>Language Codes:</b> {html.escape(', '.join(user.get('languageCodes', [])))}\n"
+        f"<b>Last Active:</b> {last_active}\n"
+        "Photos: " + ' '.join([f"<a href='{html.escape(url)}'>Photo</a>" for url in user.get('photoUrls', [])])
+    )
+
+def format_progress_single(account_name, country_code, added, countries_processed):
+    return (
+        f"🟢 <b>All Countries Progress</b>\n"
+        f"Account: {account_name}\n"
+        f"Country: {country_code}\n"
+        f"├ Sent: {added}\n"
+        f"├ Countries processed: {countries_processed}\n"
+        "\n⏳ Processing... (Press Stop to interrupt)"
+    )
+
+def format_result_single(account_name, total_added, countries_processed, start_time, end_time, like_exceeded=False, finished_by_user=False):
+    status = "✅ <b>All Countries Completed</b>" if not finished_by_user else "⛔️ <b>All Countries Stopped by User</b>"
+    extra = "\n<b>Like limit exceeded!</b>" if like_exceeded else ""
+    return (
+        f"{status}\n"
+        f"Account: {account_name}{extra}\n"
+        f"\n• Total Requests Sent: {total_added}"
+        f"\n• Countries Processed: {countries_processed}"
+        f"\n⏱️ Time used: {format_time_used(start_time, end_time)}"
+    )
+
+async def safe_edit(bot, chat_id, msg_id, text, markup=None):
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=markup, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e): pass
+        else: logging.warning(f"edit_message_text error: {e}")
+    except Exception as e:
+        logging.warning(f"edit_message_text unknown error: {e}")
 
 async def update_country_filter(session, headers, country_code):
     url = "https://api.meeff.com/user/updateFilter/v1"
@@ -78,7 +158,8 @@ async def like_user(session, headers, user_id):
         logging.error(f"❌ Exception liking user {user_id}: {e}")
     return True
 
-async def run_all_countries_token(user_id, state, bot, token, account_name, show_progress=True):
+async def run_all_countries_token(user_id, state, bot, token, account_name):
+    start_time = datetime.now()
     if not token:
         await bot.edit_message_text(
             chat_id=user_id, message_id=state["status_message_id"],
@@ -93,7 +174,7 @@ async def run_all_countries_token(user_id, state, bot, token, account_name, show
 
     async with aiohttp.ClientSession() as session:
         for country_code in COUNTRIES:
-            if not state["running"]:
+            if not state.get("running"):
                 break
             await update_country_filter(session, headers, country_code)
             users = await fetch_users(session, headers)
@@ -102,31 +183,46 @@ async def run_all_countries_token(user_id, state, bot, token, account_name, show
             state["countries_processed"] = countries_processed
             state["total_added_friends"] = requests_sent
             for user in users:
-                if country_requests >= REQUESTS_PER_COUNTRY or not state["running"]:
+                if country_requests >= REQUESTS_PER_COUNTRY or not state.get("running"):
                     break
                 if not await like_user(session, headers, user["_id"]):
                     like_limit_exceeded = True
-                    break  # break only the inner (user) loop, not the countries or accounts
+                    break
                 requests_sent += 1
                 country_requests += 1
                 state["total_added_friends"] = requests_sent
-                if show_progress:
-                    await bot.edit_message_text(
-                        chat_id=user_id, message_id=state["status_message_id"],
-                        text=f"Account: {account_name}\nCountry: {country_code} Requests sent: {requests_sent}",
-                        reply_markup=state.get("stop_markup")
-                    )
-                await asyncio.sleep(4)
-            if like_limit_exceeded:  # if like limit, do NOT continue to next country, exit for this account
+                await safe_edit(
+                    bot, user_id, state["status_message_id"],
+                    format_progress_single(account_name, country_code, requests_sent, countries_processed),
+                    ALL_COUNTRIES_STOP_MARKUP
+                )
+                try:
+                    await bot.send_message(user_id, format_user(user), parse_mode="HTML")
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+            if like_limit_exceeded:
                 break
             await asyncio.sleep(1)
         state["countries_processed"] = countries_processed
         state["total_added_friends"] = requests_sent
+    end_time = datetime.now()
+    state["finalized"] = True
+    await safe_edit(
+        bot, user_id, state["status_message_id"],
+        format_result_single(
+            account_name, requests_sent, countries_processed,
+            start_time, end_time,
+            like_exceeded=like_limit_exceeded,
+            finished_by_user=not state.get("running", True)
+        ),
+        None
+    )
     return requests_sent, countries_processed, like_limit_exceeded
 
-def run_all_countries(user_id, state, bot, get_current_account, account_name, show_progress=True):
+def run_all_countries(user_id, state, bot, get_current_account, account_name=None):
     token = get_current_account(user_id)
-    return run_all_countries_token(user_id, state, bot, token, account_name, show_progress)
+    return run_all_countries_token(user_id, state, bot, token, account_name or "Current")
 
 async def handle_all_countries_callback(
     callback_query, state, bot, user_id,
@@ -175,13 +271,13 @@ async def handle_all_countries_callback(
             account_name = token_info.get('name', f"Account {idx+1}")
             token = token_info["token"]
             state["running"] = True
+            state["finalized"] = False
             await callback_query.message.edit_text(
                 f"Account {idx+1}: {html.escape(account_name)}\nStarting All Countries feature...",
                 reply_markup=ALL_COUNTRIES_STOP_MARKUP, parse_mode="HTML"
             )
             state["status_message_id"] = callback_query.message.message_id
             state["pinned_message_id"] = callback_query.message.message_id
-            state["stop_markup"] = ALL_COUNTRIES_STOP_MARKUP
             await bot.pin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
             requests_sent, countries_processed, like_limit = await run_all_countries_token(
                 user_id, state, bot, token, account_name
@@ -195,11 +291,10 @@ async def handle_all_countries_callback(
             except Exception:
                 pass
             state["pinned_message_id"] = None
-            # DO NOT break here on like_limit, only break if state["running"] is False (user stopped)
             if not state.get("running"):
                 break
         summary_text = (
-            f"Total Account: {len(per_account_requests_sent)}\n"
+            f"Total Accounts: {len(per_account_requests_sent)}\n"
             f"Countries: {total_countries}\n"
             f"Requests sent successfully ({total_requests})\n"
             f"({' | '.join(str(x) for x in per_account_requests_sent)})"
@@ -223,63 +318,39 @@ async def handle_all_countries_callback(
         tokens = get_tokens(user_id)
         current_token = get_current_account(user_id)
         account_name = next((t.get("name", "Current") for t in tokens if t["token"] == current_token), "Current")
-        state["running"] = True
-        try:
-            await callback_query.message.edit_text(
-                f"Account: {html.escape(account_name)}\nStarting All Countries feature...",
-                reply_markup=ALL_COUNTRIES_STOP_MARKUP, parse_mode="HTML"
-            )
-            state["status_message_id"] = callback_query.message.message_id
-            state["pinned_message_id"] = callback_query.message.message_id
-            state["stop_markup"] = ALL_COUNTRIES_STOP_MARKUP
-            await bot.pin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
-            async def run_and_report():
-                requests_sent, countries_processed, like_limit = await run_all_countries_token(
-                    user_id, state, bot, current_token, account_name
-                )
-                summary_text = (
-                    f"Account: {account_name}\n"
-                    f"Countries: {countries_processed}\n"
-                    f"Requests sent successfully ({requests_sent})"
-                )
-                if like_limit: summary_text += "\nLike limit exceeded."
-                await bot.edit_message_text(
-                    chat_id=user_id, message_id=state["status_message_id"],
-                    text=summary_text, reply_markup=start_markup
-                )
-                try:
-                    await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
-                except Exception:
-                    pass
-                state["pinned_message_id"] = None
-            asyncio.create_task(run_and_report())
-            await callback_query.answer("All Countries feature started!")
-        except Exception as e:
-            logging.error(f"Error while starting All Countries feature: {e}")
-            await callback_query.message.edit_text("Failed to start All Countries feature.", reply_markup=start_markup)
-            state["running"] = False
+        state.update({"running": True, "finalized": False})
+        await callback_query.message.edit_text(
+            f"Account: {html.escape(account_name)}\nStarting All Countries feature...",
+            reply_markup=ALL_COUNTRIES_STOP_MARKUP, parse_mode="HTML"
+        )
+        state["status_message_id"] = callback_query.message.message_id
+        state["pinned_message_id"] = callback_query.message.message_id
+        await bot.pin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
+        await run_all_countries_token(user_id, state, bot, current_token, account_name)
+        pin_id = state.get("pinned_message_id")
+        if pin_id:
+            try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
+            except Exception: pass
+            state["pinned_message_id"] = None
+        state["running"] = False
+        state["finalized"] = True
         return True
 
     if data == "stop":
-        if not state["running"]:
-            await callback_query.answer("All Countries are not running!")
-        else:
-            state["running"] = False
-            tokens = get_tokens(user_id)
-            current_token = get_current_account(user_id)
-            account_name = next((t.get("name", "Current") for t in tokens if t["token"] == current_token), "Current")
-            countries_processed = state.get("countries_processed", 0)
-            requests_sent = state.get("total_added_friends", 0)
-            message_text = (
-                f"Account: {account_name}\n"
-                f"Countries: {countries_processed}\n"
-                f"Requests sent successfully ({requests_sent})"
-            )
-            await callback_query.message.edit_text(message_text, reply_markup=start_markup)
+        if not state.get("running"):
+            await callback_query.answer("All Countries is not running!")
+            return True
+        if state.get("finalized"):
             await callback_query.answer("Stopped.")
-            if state.get("pinned_message_id"):
-                await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
-                state["pinned_message_id"] = None
+            return True
+        state["finalized"] = True
+        state["running"] = False
+        pin_id = state.get("pinned_message_id")
+        if pin_id:
+            try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
+            except Exception: pass
+            state["pinned_message_id"] = None
+        await callback_query.answer("Stopped.")
         return True
 
     return False
