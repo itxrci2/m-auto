@@ -8,8 +8,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import Command
 from aiogram.types.callback_query import CallbackQuery
 
-# --- Local Imports ---
-from db import set_token, get_tokens, set_current_account, get_current_account, delete_token, set_user_filters, get_user_filters
+from db import (
+    set_token, get_tokens, set_current_account, get_current_account,
+    delete_token, set_user_filters, get_user_filters,
+    get_all_tokens, set_account_active
+)
 from lounge import send_lounge, lounge_command_handler, handle_lounge_callback
 from chatroom import send_message_to_everyone, chatroom_command_handler, handle_chatroom_callback
 from unsubscribe import unsubscribe_everyone, unsubscribe_command_handler, handle_unsubscribe_callback
@@ -22,7 +25,7 @@ from blocklist import (
     is_blocklist_active, add_to_blocklist, get_user_blocklist
 )
 
-API_TOKEN = "7735279075:AAHvefFBqiRUE4NumS0JlwTAiSMzfrgTmqA"
+API_TOKEN = "7610586859:AAFsDXtdd_rksn9QLLHm3n4GeMqsTgFDBKU"
 ADMIN_USER_IDS = [6387028671, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
 password_access = {}
@@ -282,34 +285,83 @@ async def callback_handler(callback_query: CallbackQuery):
 
     # Settings: manage accounts, filters, blocklist
     if callback_query.data == "manage_accounts":
-        tokens = get_tokens(user_id)
+        tokens = get_all_tokens(user_id)
         current_token = get_current_account(user_id)
         if not tokens:
             await callback_query.message.edit_text("No accounts saved. Send a new token to add an account.", reply_markup=back_markup)
             return
-        buttons = [
-            [InlineKeyboardButton(
-                text=f"{token['name']} {'(Current)' if token['token'] == current_token else ''}",
-                callback_data=f"set_account_{i}"),
-             InlineKeyboardButton(text="Delete", callback_data=f"delete_account_{i}")]
-            for i, token in enumerate(tokens)
-        ]
+        buttons = []
+        for i, token in enumerate(tokens):
+            is_current = (token["token"] == current_token)
+            row = [
+                InlineKeyboardButton(
+                    text=f"{token['name']} {'(Current)' if is_current else ''}",
+                    callback_data=f"set_account_{i}"
+                ),
+                InlineKeyboardButton(
+                    text="Delete", callback_data=f"delete_account_{i}"
+                ),
+                InlineKeyboardButton(
+                    text="On" if token.get("active", True) else "Off",
+                    callback_data=f"toggle_account_{i}"
+                )
+            ]
+            buttons.append(row)
         buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
-        await callback_query.message.edit_text("Manage your accounts:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback_query.message.edit_text(
+            "Manage your accounts:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
     elif callback_query.data.startswith("set_account_"):
         index = int(callback_query.data.split("_")[-1])
-        tokens = get_tokens(user_id)
+        tokens = get_all_tokens(user_id)
         if index < len(tokens):
+            if not tokens[index].get("active", True):
+                await callback_query.answer("This account is turned off. Turn it on to activate.")
+                return
             set_current_account(user_id, tokens[index]["token"])
             await callback_query.message.edit_text("Account set as active. You can now start requests.")
         else:
             await callback_query.answer("Invalid account selected.")
     elif callback_query.data.startswith("delete_account_"):
         index = int(callback_query.data.split("_")[-1])
-        tokens = get_tokens(user_id)
+        tokens = get_all_tokens(user_id)
         if index < len(tokens):
             delete_token(user_id, tokens[index]["token"])
             await callback_query.message.edit_text("Account has been deleted.", reply_markup=back_markup)
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif callback_query.data.startswith("toggle_account_"):
+        index = int(callback_query.data.split("_")[-1])
+        tokens = get_all_tokens(user_id)
+        if index < len(tokens):
+            current_status = tokens[index].get("active", True)
+            set_account_active(user_id, tokens[index]["token"], not current_status)
+            # Refresh account list after toggling
+            tokens = get_all_tokens(user_id)
+            current_token = get_current_account(user_id)
+            buttons = []
+            for i, token in enumerate(tokens):
+                is_current = (token["token"] == current_token)
+                row = [
+                    InlineKeyboardButton(
+                        text=f"{token['name']} {'(Current)' if is_current else ''}",
+                        callback_data=f"set_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="Delete", callback_data=f"delete_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="On" if token.get("active", True) else "Off",
+                        callback_data=f"toggle_account_{i}"
+                    )
+                ]
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
+            await callback_query.message.edit_text(
+                "Manage your accounts:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
         else:
             await callback_query.answer("Invalid account selected.")
     elif callback_query.data == "settings_filters":
