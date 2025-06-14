@@ -67,3 +67,51 @@ def set_user_filters(user_id, token, filters):
 def get_user_filters(user_id, token):
     record = db.tokens.find_one({"user_id": user_id, "token": token}, {"filters": 1})
     return record["filters"] if record and "filters" in record else None
+
+def add_to_blocklist(user_id, block_id):
+    db.blocklist.update_one(
+        {"user_id": user_id},
+        {"$addToSet": {"blocklist": block_id}},
+        upsert=True
+    )
+
+def get_user_blocklist(user_id):
+    record = db.blocklist.find_one({"user_id": user_id})
+    return set(record.get("blocklist", [])) if record else set()
+
+def is_blocklist_active(user_id):
+    # You can adjust this logic as needed; here we consider blocklist as active if any blocklist exists.
+    record = db.blocklist.find_one({"user_id": user_id})
+    return bool(record and record.get("blocklist"))
+
+def transfer_user_data(from_user_id, to_user_id):
+    """
+    Transfer all tokens, filters, current account, and blocklist from one Telegram user to another.
+    """
+    # Transfer tokens
+    tokens = list(db.tokens.find({'user_id': from_user_id}))
+    for token in tokens:
+        token_copy = token.copy()
+        token_copy['user_id'] = to_user_id
+        token_copy.pop('_id', None)
+        db.tokens.update_one(
+            {'user_id': to_user_id, 'token': token_copy['token']},
+            {'$set': token_copy},
+            upsert=True
+        )
+    # Transfer current account
+    ca = db.current_account.find_one({'user_id': from_user_id})
+    if ca:
+        db.current_account.update_one(
+            {'user_id': to_user_id},
+            {'$set': {'token': ca['token']}},
+            upsert=True
+        )
+    # Transfer blocklist
+    bl = db.blocklist.find_one({'user_id': from_user_id})
+    if bl and bl.get("blocklist"):
+        db.blocklist.update_one(
+            {'user_id': to_user_id},
+            {'$set': {'blocklist': bl['blocklist']}},
+            upsert=True
+        )
