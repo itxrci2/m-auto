@@ -11,7 +11,8 @@ from aiogram.types.callback_query import CallbackQuery
 from db import (
     set_token, get_tokens, set_current_account, get_current_account,
     delete_token, set_user_filters, get_user_filters,
-    get_all_tokens, set_account_active
+    get_all_tokens, set_account_active,
+    transfer_user_data
 )
 from lounge import send_lounge, lounge_command_handler, handle_lounge_callback
 from chatroom import send_message_to_everyone, chatroom_command_handler, handle_chatroom_callback
@@ -25,7 +26,7 @@ from blocklist import (
     is_blocklist_active, add_to_blocklist, get_user_blocklist
 )
 
-API_TOKEN = "7735279075:AAHvefFBqiRUE4NumS0JlwTAiSMzfrgTmqA"
+API_TOKEN = "7682628861:AAEEXyWLUiP2jOtsghWqt0bw4L65H6mwsyY"
 ADMIN_USER_IDS = [6387028671, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
 password_access = {}
@@ -212,6 +213,27 @@ async def aio_command(message: types.Message):
         return
     await message.answer("Choose an action:", reply_markup=aio_markup)
 
+@router.message(Command("transfer"))
+async def transfer_command(message: types.Message):
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    args = message.text.strip().split()
+    if len(args) < 2:
+        await message.reply("Usage: /transfer <destination_user_id>")
+        return
+    try:
+        to_user_id = int(args[1])
+    except Exception:
+        await message.reply("Invalid user ID format.")
+        return
+    from_user_id = message.chat.id
+    if to_user_id == from_user_id:
+        await message.reply("You cannot transfer to your own account.")
+        return
+    transfer_user_data(from_user_id, to_user_id)
+    await message.reply(f"All Meeff tokens and settings have been transferred to user ID {to_user_id}.")
+
 @router.message()
 async def handle_new_token(message: types.Message):
     if message.text and message.text.startswith("/"):
@@ -277,7 +299,7 @@ async def callback_handler(callback_query: CallbackQuery):
         callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account,
         run_all_countries, start_markup
     ): return
-    # Requests
+    # Requests (with speed markup support)
     if await handle_requests_callback(
         callback_query, state, bot, user_id, get_current_account, get_tokens,
         set_current_account, start_markup
@@ -388,7 +410,8 @@ async def set_bot_commands():
         BotCommand(command="invoke", description="Verify and remove disabled accounts"),
         BotCommand(command="skip", description="Unsubscribe from all chatrooms"),
         BotCommand(command="settings", description="Open settings menu"),
-        BotCommand(command="password", description="Enter password for temporary access")
+        BotCommand(command="password", description="Enter password for temporary access"),
+        BotCommand(command="transfer", description="Transfer all tokens/settings to another Telegram user"),
     ]
     await bot.set_my_commands(commands)
 
