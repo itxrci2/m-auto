@@ -23,9 +23,10 @@ async def set_filter(callback_query: types.CallbackQuery):
         return
 
     filters = get_user_filters(user_id, token) or {}
+    # Set default age to 30 years (current year 2025 - 30 = 1995)
     filter_data = {
-        "filterGenderType": filters.get("filterGenderType", 5),           # Default changed to 5 (female)
-        "filterBirthYearFrom": filters.get("filterBirthYearFrom", 1979),
+        "filterGenderType": filters.get("filterGenderType", 5),           # Default: 5 (female)
+        "filterBirthYearFrom": filters.get("filterBirthYearFrom", 1995),  # Default: 30 years old
         "filterBirthYearTo": 2006,
         "filterDistance": 510,
         "filterLanguageCodes": filters.get("filterLanguageCodes", ""),
@@ -47,7 +48,7 @@ async def set_filter(callback_query: types.CallbackQuery):
         return
     elif d.startswith("filter_age_"):
         age = int(d.split("_")[-1])
-        filter_data["filterBirthYearFrom"] = 2024 - age  # Adjust current year if needed
+        filter_data["filterBirthYearFrom"] = 2025 - age  # Adjust current year if needed
         filter_data["filterBirthYearTo"] = 2006
         msg = f"Filter updated: Age set to {age}"
     elif d == "filter_nationality":
