@@ -2,11 +2,13 @@ import asyncio
 import aiohttp
 import html
 import logging
+import json
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from blocklist import is_blocklist_active, add_to_blocklist, get_user_blocklist
 from dateutil import parser
 from datetime import datetime
+from db import get_user_filters
 
 # --- UI MARKUPS ---
 
@@ -24,6 +26,19 @@ REQUESTS_ALL_CONFIRM_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
 STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Stop Requests", callback_data="stop")]
 ])
+
+SPEED_LEVELS = {
+    "default": ("Default", 1.0),
+    "medium": ("Medium", 0.5),
+    "turbo": ("Turbo", 0.02)
+}
+
+def get_speed_markup(current_speed=None):
+    buttons = []
+    for key, (title, _) in SPEED_LEVELS.items():
+        text = f"{title} {'(Current)' if key == current_speed else ''}"
+        buttons.append(InlineKeyboardButton(text=text, callback_data=f"speed_{key}"))
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 def format_user(user):
     def time_ago(dt_str):
@@ -125,7 +140,24 @@ async def safe_edit(bot, chat_id, msg_id, text, markup=None):
     except Exception as e:
         logging.warning(f"edit_message_text unknown error: {e}")
 
-async def run_requests_parallel(user_id, bot, tokens, status_message_id, state):
+async def update_current_filter(user_id, token):
+    filters = get_user_filters(user_id, token)
+    if not filters:
+        return  # nothing to update
+    headers = {
+        'User-Agent': "okhttp/4.12.0",
+        'Accept-Encoding': "gzip",
+        'meeff-access-token': token,
+        'content-type': "application/json; charset=utf-8"
+    }
+    url = "https://api.meeff.com/user/updateFilter/v1"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, data=json.dumps(filters), headers=headers) as response:
+            if response.status != 200:
+                resp_text = await response.text()
+                logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
+
+async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
     start_time = datetime.now()
     accounts = [{"added":0, "skipped":0, "exceeded":False, "running":True} for _ in tokens]
     names = [tok.get("name", f"Account {i+1}") for i, tok in enumerate(tokens)]
@@ -144,6 +176,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state):
 
     async def worker(i, token):
         acc = accounts[i]
+        sent_since_last_filter_update = 0
         async with aiohttp.ClientSession() as session:
             while acc["running"] and state.get("running", True):
                 users = await fetch_users(session, token["token"])
@@ -162,11 +195,18 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state):
                         if data.get("errorCode") == "LikeExceeded":
                             acc["exceeded"] = True; acc["running"] = False; await update(); return
                         acc["added"] += 1
+                        sent_since_last_filter_update += 1
+                        if sent_since_last_filter_update >= 7:
+                            sent_since_last_filter_update = 0
+                            try:
+                                await update_current_filter(user_id, token["token"])
+                            except Exception as e:
+                                logging.warning(f"Auto filter update failed: {e}")
                         if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
                         try: await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                         except: pass
-                        await update(); await asyncio.sleep(1)
-                await asyncio.sleep(1)
+                        await update(); await asyncio.sleep(speed)
+                await asyncio.sleep(speed)
             await update()
 
     state["finalized"] = False
@@ -181,12 +221,13 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state):
         format_result(accounts, names, start_time, end_time, finished_by_user=state.get("stopped_by_user", False)),
     )
 
-async def run_requests_single(user_id, state, bot, token, account_name):
+async def run_requests_single(user_id, state, bot, token, account_name, speed):
     start_time = datetime.now()
     state["total_added_friends"] = 0
     state["skipped_count"] = 0
     last_text = None
     like_exceeded = False
+    sent_since_last_filter_update = 0
 
     async def update():
         nonlocal last_text
@@ -215,11 +256,18 @@ async def run_requests_single(user_id, state, bot, token, account_name):
                         state["running"] = False
                         break
                     state["total_added_friends"] += 1
+                    sent_since_last_filter_update += 1
+                    if sent_since_last_filter_update >= 7:
+                        sent_since_last_filter_update = 0
+                        try:
+                            await update_current_filter(user_id, token)
+                        except Exception as e:
+                            logging.warning(f"Auto filter update failed: {e}")
                     if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
                     try: await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                     except: pass
-                    await update(); await asyncio.sleep(1)
-            await asyncio.sleep(1)
+                    await update(); await asyncio.sleep(speed)
+            await asyncio.sleep(speed)
     end_time = datetime.now()
     state["finalized"] = True
     await safe_edit(
@@ -234,9 +282,9 @@ async def run_requests_single(user_id, state, bot, token, account_name):
         )
     )
 
-def run_requests(user_id, state, bot, get_current_account, account_name=None):
+def run_requests(user_id, state, bot, get_current_account, account_name=None, speed=1.0):
     token = get_current_account(user_id)
-    return run_requests_single(user_id, state, bot, token, account_name or "Current")
+    return run_requests_single(user_id, state, bot, token, account_name or "Current", speed)
 
 async def handle_requests_callback(
     callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account, start_markup
@@ -247,10 +295,12 @@ async def handle_requests_callback(
         await callback_query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
         await callback_query.answer()
 
+    # Start menu
     if data == "start":
         await edit("How would you like to send requests?", REQUESTS_CHOICE_MARKUP)
         return True
 
+    # "All" selected
     if data == "requests_all":
         tokens = get_tokens(user_id)
         if not tokens:
@@ -262,43 +312,17 @@ async def handle_requests_callback(
         state["pending_requests_all"] = True
         return True
 
+    # "All" confirm
     if data == "requests_confirm":
         if not state.get("pending_requests_all"):
             await callback_query.answer("Nothing to confirm.")
             return True
-        tokens = get_tokens(user_id)
-        if not tokens:
-            await edit("No accounts found.", start_markup)
-            state.pop("pending_requests_all", None)
-            return True
-        state.update({"running": True, "finalized": False, "mode": "all"})
-        status_msg = await callback_query.message.edit_text(
-            format_progress(
-                [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
-                [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
-            ),
-            reply_markup=STOP_MARKUP,
-            parse_mode="HTML"
-        )
-        state["pinned_message_id"] = status_msg.message_id
-        await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-        await run_requests_parallel(user_id, bot, tokens, status_msg.message_id, state)
-        try: await bot.unpin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-        except: pass
-        state.pop("pending_requests_all", None)
-        state["running"] = False
-        state.pop("mode", None)
-        state.pop("stopped_by_user", None)
-        state.pop("per_account", None)
-        state.pop("account_names", None)
+        # After confirm, show speed selection
+        state["pending_speed_mode"] = "all"
+        await edit("Select speed for requests:", get_speed_markup())
         return True
 
-    if data == "requests_cancel":
-        state.pop("pending_requests_all", None)
-        await edit("Requests operation cancelled.", start_markup)
-        await callback_query.answer("Cancelled.")
-        return True
-
+    # "Current" selected
     if data == "requests_current":
         if state.get("running"):
             await callback_query.answer("Requests are already running!")
@@ -306,28 +330,21 @@ async def handle_requests_callback(
         tokens = get_tokens(user_id)
         current_token = get_current_account(user_id)
         account_name = next((tok.get("name", "Current") for tok in tokens if tok["token"] == current_token), "Current")
-        state.update({"running": True, "finalized": False, "mode": "current", "skipped_count": 0})
-        status_message = await callback_query.message.edit_text(
-            format_progress_single(account_name, 0, 0),
-            reply_markup=STOP_MARKUP,
-            parse_mode="HTML"
-        )
-        state["status_message_id"] = status_message.message_id
-        state["pinned_message_id"] = status_message.message_id
-        await bot.pin_chat_message(chat_id=user_id, message_id=state["status_message_id"])
-        await run_requests_single(user_id, state, bot, current_token, account_name)
-        pin_id = state.get("pinned_message_id")
-        if pin_id:
-            try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
-            except: pass
-            state["pinned_message_id"] = None
-        state["running"] = False
-        state.pop("mode", None)
-        state.pop("stopped_by_user", None)
-        state.pop("per_account", None)
-        state.pop("account_names", None)
+        state["pending_speed_mode"] = "current"
+        state["pending_account_name"] = account_name
+        await edit("Select speed for requests:", get_speed_markup())
         return True
 
+    # Cancel
+    if data == "requests_cancel":
+        state.pop("pending_requests_all", None)
+        state.pop("pending_speed_mode", None)
+        state.pop("pending_account_name", None)
+        await edit("Requests operation cancelled.", start_markup)
+        await callback_query.answer("Cancelled.")
+        return True
+
+    # Stop requests
     if data == "stop":
         if not state.get("running"):
             await callback_query.answer("Requests are not running!")
@@ -345,5 +362,67 @@ async def handle_requests_callback(
             state["pinned_message_id"] = None
         await callback_query.answer("Stopped.")
         return True
+
+    # SPEED selection (start requests after this)
+    if data.startswith("speed_"):
+        selected = data.split("_", 1)[1]
+        if selected not in SPEED_LEVELS:
+            await edit("Unknown speed selected.")
+            return True
+        speed_value = SPEED_LEVELS[selected][1]
+        mode = state.pop("pending_speed_mode", None)
+        if mode == "current":
+            tokens = get_tokens(user_id)
+            current_token = get_current_account(user_id)
+            account_name = state.pop("pending_account_name", "Current")
+            state.update({"running": True, "finalized": False, "mode": "current", "skipped_count": 0})
+            status_message = await callback_query.message.edit_text(
+                format_progress_single(account_name, 0, 0),
+                reply_markup=STOP_MARKUP,
+                parse_mode="HTML"
+            )
+            state["status_message_id"] = status_message.message_id
+            state["pinned_message_id"] = status_message.message_id
+            await bot.pin_chat_message(chat_id=user_id, message_id=state["status_message_id"])
+            await run_requests_single(user_id, state, bot, current_token, account_name, speed_value)
+            pin_id = state.get("pinned_message_id")
+            if pin_id:
+                try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
+                except: pass
+                state["pinned_message_id"] = None
+            state["running"] = False
+            state.pop("mode", None)
+            state.pop("stopped_by_user", None)
+            state.pop("per_account", None)
+            state.pop("account_names", None)
+            return True
+        elif mode == "all":
+            tokens = get_tokens(user_id)
+            if not tokens:
+                await edit("No accounts found.")
+                return True
+            state.update({"running": True, "finalized": False, "mode": "all"})
+            status_msg = await callback_query.message.edit_text(
+                format_progress(
+                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
+                    [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
+                ),
+                reply_markup=STOP_MARKUP,
+                parse_mode="HTML"
+            )
+            state["pinned_message_id"] = status_msg.message_id
+            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
+            await run_requests_parallel(user_id, bot, tokens, status_msg.message_id, state, speed_value)
+            try: await bot.unpin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
+            except: pass
+            state["running"] = False
+            state.pop("mode", None)
+            state.pop("stopped_by_user", None)
+            state.pop("per_account", None)
+            state.pop("account_names", None)
+            return True
+        else:
+            await edit("Speed selection not allowed here.")
+            return True
 
     return False
