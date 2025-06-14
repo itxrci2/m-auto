@@ -24,7 +24,7 @@ async def set_filter(callback_query: types.CallbackQuery):
 
     filters = get_user_filters(user_id, token) or {}
     filter_data = {
-        "filterGenderType": filters.get("filterGenderType", 7),
+        "filterGenderType": filters.get("filterGenderType", 5),           # Default changed to 5 (female)
         "filterBirthYearFrom": filters.get("filterBirthYearFrom", 1979),
         "filterBirthYearTo": 2006,
         "filterDistance": 510,
@@ -40,7 +40,7 @@ async def set_filter(callback_query: types.CallbackQuery):
         return
     if d.startswith("filter_gender_"):
         gender = d.split("_")[-1]
-        filter_data["filterGenderType"] = {"male": 6, "female": 5, "all": 7}.get(gender, 7)
+        filter_data["filterGenderType"] = {"male": 6, "female": 5, "all": 7}.get(gender, 5)
         msg = f"Filter updated: Gender set to {gender.capitalize()}"
     elif d == "filter_age":
         await callback_query.message.edit_text("Select Age:", reply_markup=get_age_keyboard())
