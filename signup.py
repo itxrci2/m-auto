@@ -330,26 +330,37 @@ async def try_signup(state):
         async with session.post(url, json=payload, headers=headers) as resp:
             return await resp.json()
 
-async def try_signin(email, password):
-    url = "https://api.meeff.com/user/login/v4"
-    payload = {
-      "provider": "email",
-      "providerId": email,
-      "providerToken": password,
-      "os": "Android v13",
-      "platform": "android",
-      "device": "BRAND: IPHONE, MODEL: 11, DEVICE: Infinix-X670, PRODUCT: X670-GL, DISPLAY: X670-H814DGHJKL-T-GL-240224V556",
-      "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFw8faC6nA_QUWskKsVhwnWz-ioHTdNpHC5Kk3eXonehp8VFVntWcz_2BiyF-fcYnP4DGOIu27gJPEff8p1uDk3e4DiYpFGInC08eFMH9MJjnuZ-Jc",
-      "deviceUniqueId": "56cb9030870fa44a",
-      "deviceLanguage": "en",
-      "deviceRegion": "US",
-      "simRegion": "PK",
-      "deviceGmtOffset": "+0500",
-      "deviceRooted": 0,
-      "deviceEmulator": 0,
-      "appVersion": "6.5.5",
-      "locale": "en"
-    }
+payload = {
+    "providerId": state["email"],
+    "providerToken": state["password"],
+    "os": "iOS 17.5.1",
+    "platform": "ios",
+    "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
+    "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
+    "deviceUniqueId": "56cb9030870fa44a",
+    "deviceLanguage": "en",
+    "deviceRegion": "US",
+    "simRegion": "US",
+    "deviceGmtOffset": "-0700",  # US Pacific Time (PDT)
+    "deviceRooted": 0,
+    "deviceEmulator": 0,
+    "appVersion": "6.5.5",
+    "name": state["name"],
+    "gender": state["gender"],
+    "color": "777777",
+    "birthYear": 2004,
+    "birthMonth": 3,
+    "birthDay": 1,
+    "nationalityCode": "US",
+    "languages": "en,zh,ko,be,ru,uk",
+    "levels": "5,1,1,1,1,1",
+    "description": state["desc"],
+    "photos": photos_str,
+    "purpose": "PB000000,PB000001",
+    "purposeEtcDetail": "",
+    "interest": "IS000001,IS000002,IS000003,IS000004,IS000005,IS000006,IS000007,IS000008",
+    "locale": "en_US"
+}
     headers = {
       'User-Agent': "okhttp/5.0.0-alpha.14",
       'Accept-Encoding': "gzip",
