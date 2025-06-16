@@ -28,7 +28,7 @@ from blocklist import (
 # --- SIGNUP/SIGNIN IMPORTS ---
 from signup import signup_command, signup_callback_handler, signup_message_handler
 
-API_TOKEN = "7682628861:AAEEXyWLUiP2jOtsghWqt0bw4L65H6mwsyY"
+API_TOKEN = "7735279075:AAHvefFBqiRUE4NumS0JlwTAiSMzfrgTmqA"
 ADMIN_USER_IDS = [6387028671, 7725409374, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
 password_access = {}
