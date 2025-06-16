@@ -25,8 +25,10 @@ from blocklist import (
     blocklist_command, handle_blocklist_callback,
     is_blocklist_active, add_to_blocklist, get_user_blocklist
 )
+# --- SIGNUP/SIGNIN IMPORTS ---
+from signup import signup_command, signup_callback_handler, signup_message_handler
 
-API_TOKEN = "7735279075:AAHvefFBqiRUE4NumS0JlwTAiSMzfrgTmqA"
+API_TOKEN = "7682628861:AAEEXyWLUiP2jOtsghWqt0bw4L65H6mwsyY"
 ADMIN_USER_IDS = [6387028671, 7725409374, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
 password_access = {}
@@ -44,14 +46,18 @@ user_states = defaultdict(lambda: {
     "total_added_friends": 0
 })
 
-def get_settings_markup():
+def get_tools_markup():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Accounts", callback_data="manage_accounts"),
             InlineKeyboardButton(text="Filters", callback_data="settings_filters"),
-            InlineKeyboardButton(text="Blocklist", callback_data="settings_blocklist")
+            InlineKeyboardButton(text="Blocklist", callback_data="settings_blocklist"),
         ],
-        [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
+        [
+            InlineKeyboardButton(text="Sign Up", callback_data="signup_go"),
+            InlineKeyboardButton(text="Sign In", callback_data="signin_go"),
+            InlineKeyboardButton(text="Back", callback_data="back_to_menu")
+        ]
     ])
 
 start_markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -99,12 +105,12 @@ async def start_command(message: types.Message):
     state["status_message_id"] = status.message_id
     state["pinned_message_id"] = None
 
-@router.message(Command("settings"))
-async def settings_command(message: types.Message):
+@router.message(Command("tools"))
+async def tools_command(message: types.Message):
     if not has_valid_access(message.chat.id):
         await message.reply("You are not authorized to use this bot.")
         return
-    await message.answer("Settings menu. Choose an option below:", reply_markup=get_settings_markup())
+    await message.answer("Accounts & Tools menu. Choose an option below:", reply_markup=get_tools_markup())
 
 @router.message(Command("chatroom"))
 async def chatroom_command(message: types.Message):
@@ -236,6 +242,9 @@ async def transfer_command(message: types.Message):
 
 @router.message()
 async def handle_new_token(message: types.Message):
+    # SIGNUP/SIGNIN message handler (priority, skip token listener if handled)
+    if await signup_message_handler(message):
+        return
     if message.text and message.text.startswith("/"):
         return
     user_id = message.from_user.id
@@ -280,6 +289,10 @@ async def callback_handler(callback_query: CallbackQuery):
         await callback_query.answer("You are not authorized to use this bot.")
         return
 
+    # --- SIGNUP/SIGNIN CALLS (priority) ---
+    if await signup_callback_handler(callback_query):
+        return
+
     # Blocklist first
     if await handle_blocklist_callback(callback_query):
         return
@@ -305,7 +318,7 @@ async def callback_handler(callback_query: CallbackQuery):
         set_current_account, start_markup
     ): return
 
-    # Settings: manage accounts, filters, blocklist
+    # Tools: manage accounts, filters, blocklist, and sign up/in
     if callback_query.data == "manage_accounts":
         tokens = get_all_tokens(user_id)
         current_token = get_current_account(user_id)
@@ -314,7 +327,7 @@ async def callback_handler(callback_query: CallbackQuery):
             return
         buttons = []
         for i, token in enumerate(tokens):
-            is_current = (token["token"] == current_token)
+            is_current = (token['token'] == current_token)
             row = [
                 InlineKeyboardButton(
                     text=f"{token['name']} {'(Current)' if is_current else ''}",
@@ -364,7 +377,7 @@ async def callback_handler(callback_query: CallbackQuery):
             current_token = get_current_account(user_id)
             buttons = []
             for i, token in enumerate(tokens):
-                is_current = (token["token"] == current_token)
+                is_current = (token['token'] == current_token)
                 row = [
                     InlineKeyboardButton(
                         text=f"{token['name']} {'(Current)' if is_current else ''}",
@@ -409,7 +422,7 @@ async def set_bot_commands():
         BotCommand(command="aio", description="Show aio commands"),
         BotCommand(command="invoke", description="Verify and remove disabled accounts"),
         BotCommand(command="skip", description="Unsubscribe from all chatrooms"),
-        BotCommand(command="settings", description="Open settings menu"),
+        BotCommand(command="tools", description="Accounts & Tools"),
         BotCommand(command="password", description="Enter password for temporary access"),
         BotCommand(command="transfer", description="Transfer all tokens/settings to another Telegram user"),
     ]
