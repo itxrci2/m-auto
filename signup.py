@@ -28,20 +28,12 @@ def format_user_with_nationality(user):
             return "unknown"
     last_active = time_ago(user.get("recentAt"))
 
-    height_val = user.get("height", "N/A")
-    if isinstance(height_val, str) and "|" in height_val:
-        height_num, height_unit = height_val.split("|", 1)
-        height_str = f"{height_num} {height_unit}"
-    else:
-        height_str = height_val
-
     card = (
         f"<b>Name:</b> {user.get('name', 'N/A')}\n"
         f"<b>ID:</b> <code>{user.get('_id', 'N/A')}</code>\n"
         f"<b>Description:</b> {user.get('description', 'N/A')}\n"
         f"<b>Birth Year:</b> {user.get('birthYear', 'N/A')}\n"
         f"<b>Nationality Code:</b> {user.get('nationalityCode', 'N/A')}\n"
-        f"<b>Height:</b> {height_str}\n"
         f"<b>Platform:</b> {user.get('platform', 'N/A')}\n"
         f"<b>Profile Score:</b> {user.get('profileScore', 'N/A')}\n"
         f"<b>Distance:</b> {user.get('distance', 'N/A')} km\n"
