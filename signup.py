@@ -27,7 +27,7 @@ def format_user_with_nationality(user):
         except Exception:
             return "unknown"
     last_active = time_ago(user.get("recentAt"))
-    return (
+    card = (
         f"<b>Name:</b> {user.get('name', 'N/A')}\n"
         f"<b>ID:</b> <code>{user.get('_id', 'N/A')}</code>\n"
         f"<b>Description:</b> {user.get('description', 'N/A')}\n"
@@ -40,6 +40,14 @@ def format_user_with_nationality(user):
         f"<b>Last Active:</b> {last_active}\n"
         "Photos: " + ' '.join([f"<a href='{url}'>Photo</a>" for url in user.get('photoUrls', [])])
     )
+    # Attach credentials if present in user
+    if "email" in user:
+        card += f"\n<b>Email:</b> <code>{user['email']}</code>"
+    if "password" in user:
+        card += f"\n<b>Password:</b> <code>{user['password']}</code>"
+    if "token" in user:
+        card += f"\n<b>Token:</b> <code>{user['token']}</code>"
+    return card
 
 SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
@@ -251,24 +259,21 @@ async def meeff_upload_image(img_bytes):
                     print("Meeff upload: missing upload_info or data.")
                     return None
                 upload_url = data.get("Host")
-                # S3 required fields (all must be present)
                 fields = {
-    "key": upload_info.get("key"),
-    "acl": data.get("acl"),
-    "Content-Type": data.get("Content-Type"),
-    "x-amz-meta-uuid": data.get("x-amz-meta-uuid"),
-    "X-Amz-Algorithm": upload_info.get("X-Amz-Algorithm") or data.get("X-Amz-Algorithm"),
-    "X-Amz-Credential": upload_info.get("X-Amz-Credential") or data.get("X-Amz-Credential"),
-    "X-Amz-Date": upload_info.get("X-Amz-Date") or data.get("X-Amz-Date"),
-    "Policy": upload_info.get("Policy") or data.get("Policy"),
-    "X-Amz-Signature": upload_info.get("X-Amz-Signature") or data.get("X-Amz-Signature"),
-}
-                # Check for missing fields
+                    "key": upload_info.get("key"),
+                    "acl": data.get("acl"),
+                    "Content-Type": data.get("Content-Type"),
+                    "x-amz-meta-uuid": data.get("x-amz-meta-uuid"),
+                    "X-Amz-Algorithm": upload_info.get("X-Amz-Algorithm") or data.get("X-Amz-Algorithm"),
+                    "X-Amz-Credential": upload_info.get("X-Amz-Credential") or data.get("X-Amz-Credential"),
+                    "X-Amz-Date": upload_info.get("X-Amz-Date") or data.get("X-Amz-Date"),
+                    "Policy": upload_info.get("Policy") or data.get("Policy"),
+                    "X-Amz-Signature": upload_info.get("X-Amz-Signature") or data.get("X-Amz-Signature"),
+                }
                 for k, v in fields.items():
                     if v is None:
                         print(f"Meeff S3 upload missing field: {k}")
                         return None
-                # Build multipart form
                 form = aiohttp.FormData()
                 for k, v in fields.items():
                     form.add_field(k, v)
@@ -290,41 +295,41 @@ async def try_signup(state):
         photos_str = DEFAULT_PHOTOS
     url = "https://api.meeff.com/user/register/email/v4"
     payload = {
-      "providerId": state["email"],
-      "providerToken": state["password"],
-      "os": "iOS 17.5.1",
-      "platform": "ios",
-      "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
-      "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
-      "deviceUniqueId": "56cb9030870fa44a",
-      "deviceLanguage": "en",
-      "deviceRegion": "US",
-      "simRegion": "US",
-      "deviceGmtOffset": "-0700",
-      "deviceRooted": 0,
-      "deviceEmulator": 0,
-      "appVersion": "6.5.5",
-      "name": state["name"],
-      "gender": state["gender"],
-      "color": "777777",
-      "birthYear": 2004,
-      "birthMonth": 3,
-      "birthDay": 1,
-      "nationalityCode": "US",
-      "languages": "en,zh,ko,be,ru,uk",
-      "levels": "5,1,1,1,1,1",
-      "description": state["desc"],
-      "photos": photos_str,
-      "purpose": "PB000000,PB000001",
-      "purposeEtcDetail": "",
-      "interest": "IS000001,IS000002,IS000003,IS000004,IS000005,IS000006,IS000007,IS000008",
-      "locale": "en"
+        "providerId": state["email"],
+        "providerToken": state["password"],
+        "os": "iOS 17.5.1",
+        "platform": "ios",
+        "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
+        "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
+        "deviceUniqueId": "56cb9030870fa44a",
+        "deviceLanguage": "en",
+        "deviceRegion": "US",
+        "simRegion": "US",
+        "deviceGmtOffset": "-0700",
+        "deviceRooted": 0,
+        "deviceEmulator": 0,
+        "appVersion": "6.5.5",
+        "name": state["name"],
+        "gender": state["gender"],
+        "color": "777777",
+        "birthYear": 2004,
+        "birthMonth": 3,
+        "birthDay": 1,
+        "nationalityCode": "US",
+        "languages": "en,zh,ko,be,ru,uk",
+        "levels": "5,1,1,1,1,1",
+        "description": state["desc"],
+        "photos": photos_str,
+        "purpose": "PB000000,PB000001",
+        "purposeEtcDetail": "",
+        "interest": "IS000001,IS000002,IS000003,IS000004,IS000005,IS000006,IS000007,IS000008",
+        "locale": "en"
     }
     headers = {
-      'User-Agent': "okhttp/5.0.0-alpha.14",
-      'Accept-Encoding': "gzip",
-      'Content-Type': "application/json",
-      'content-type': "application/json; charset=utf-8"
+        'User-Agent': "okhttp/5.0.0-alpha.14",
+        'Accept-Encoding': "gzip",
+        'Content-Type': "application/json",
+        'content-type': "application/json; charset=utf-8"
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as resp:
@@ -333,28 +338,28 @@ async def try_signup(state):
 async def try_signin(email, password):
     url = "https://api.meeff.com/user/login/v4"
     payload = {
-      "provider": "email",
-      "providerId": email,
-      "providerToken": password,
-      "os": "iOS 17.5.1",
-      "platform": "ios",
-      "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
-      "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
-      "deviceUniqueId": "56cb9030870fa44a",
-      "deviceLanguage": "en",
-      "deviceRegion": "US",
-      "simRegion": "US",
-      "deviceGmtOffset": "-0700",
-      "deviceRooted": 0,
-      "deviceEmulator": 0,
-      "appVersion": "6.5.5",
-      "locale": "en"
+        "provider": "email",
+        "providerId": email,
+        "providerToken": password,
+        "os": "iOS 17.5.1",
+        "platform": "ios",
+        "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
+        "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
+        "deviceUniqueId": "56cb9030870fa44a",
+        "deviceLanguage": "en",
+        "deviceRegion": "US",
+        "simRegion": "US",
+        "deviceGmtOffset": "-0700",
+        "deviceRooted": 0,
+        "deviceEmulator": 0,
+        "appVersion": "6.5.5",
+        "locale": "en"
     }
     headers = {
-      'User-Agent': "okhttp/5.0.0-alpha.14",
-      'Accept-Encoding': "gzip",
-      'Content-Type': "application/json",
-      'content-type': "application/json; charset=utf-8"
+        'User-Agent': "okhttp/5.0.0-alpha.14",
+        'Accept-Encoding': "gzip",
+        'Content-Type': "application/json",
+        'content-type': "application/json; charset=utf-8"
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as resp:
@@ -369,6 +374,10 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
         account_name = user_data.get("name") if user_data else creds.get("email")
         set_token(user_id, access_token, account_name)
         if user_data:
+            # Attach credentials to user_data so they are included in card
+            user_data["email"] = creds.get("email")
+            user_data["password"] = creds.get("password")
+            user_data["token"] = access_token
             text = format_user_with_nationality(user_data)
             await msg_obj.edit_text("Account signed in and saved!\n" + text, parse_mode="HTML")
         else:
