@@ -3,6 +3,7 @@ import aiohttp
 import html
 import logging
 import json
+import time
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from blocklist import is_blocklist_active, add_to_blocklist, get_user_blocklist
@@ -62,10 +63,8 @@ def format_user(user):
         except Exception:
             return "unknown"
     last_active = time_ago(user.get("recentAt"))
-    # Add nationality and height to the card if available
     nationality = html.escape(user.get('nationalityCode', 'N/A'))
     height = html.escape(str(user.get('height', 'N/A')))
-    # Some APIs return "163|cm", let's split that for prettier output
     if "|" in height:
         height_val, height_unit = height.split("|", 1)
         height = f"{height_val.strip()} {height_unit.strip()}"
@@ -173,14 +172,19 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
     state["per_account"] = accounts
     state["account_names"] = names
     last_text = None
+    last_update_time = 0
+    UPDATE_INTERVAL = 2  # seconds
 
-    async def update():
-        nonlocal last_text
+    async def update(force=False):
+        nonlocal last_text, last_update_time
+        now = time.time()
         if state.get("finalized"):
             return
         text = format_progress(accounts, names)
-        if text != last_text:
+        # Only update if enough time has passed, or force is True, or the text actually changed
+        if force or (text != last_text and (now - last_update_time) > UPDATE_INTERVAL):
             last_text = text
+            last_update_time = now
             await safe_edit(bot, user_id, status_message_id, text, STOP_MARKUP)
 
     async def worker(i, token):
@@ -190,19 +194,24 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
             while acc["running"] and state.get("running", True):
                 users = await fetch_users(session, token["token"])
                 if not users:
-                    await update()
+                    await update(force=True)
                     break
                 blocklist = get_user_blocklist(user_id) if is_blocklist_active(user_id) else set()
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
                     if user['_id'] in blocklist:
-                        acc["skipped"] += 1; await update(); continue
+                        acc["skipped"] += 1
+                        await update()
+                        continue
                     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                     headers = {"meeff-access-token": token["token"], "Connection": "keep-alive"}
                     async with session.get(url, headers=headers) as resp:
                         data = await resp.json()
                         if data.get("errorCode") == "LikeExceeded":
-                            acc["exceeded"] = True; acc["running"] = False; await update(); return
+                            acc["exceeded"] = True
+                            acc["running"] = False
+                            await update(force=True)
+                            return
                         acc["added"] += 1
                         sent_since_last_filter_update += 1
                         if sent_since_last_filter_update >= 7:
@@ -213,12 +222,12 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                                 logging.warning(f"Auto filter update failed: {e}")
                         if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
                         try:
-                            # Send user info card only after the user is added, and include nationality and height
                             await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                         except: pass
-                        await update(); await asyncio.sleep(speed)
+                        await update()
+                        await asyncio.sleep(speed)
                 await asyncio.sleep(speed)
-            await update()
+            await update(force=True)
 
     state["finalized"] = False
     await safe_edit(bot, user_id, status_message_id, format_progress(accounts, names), STOP_MARKUP)
@@ -237,27 +246,35 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
     state["total_added_friends"] = 0
     state["skipped_count"] = 0
     last_text = None
+    last_update_time = 0
+    UPDATE_INTERVAL = 2  # seconds
     like_exceeded = False
     sent_since_last_filter_update = 0
 
-    async def update():
-        nonlocal last_text
+    async def update(force=False):
+        nonlocal last_text, last_update_time
+        now = time.time()
         if state.get("finalized"):
             return
         text = format_progress_single(account_name, state["total_added_friends"], state["skipped_count"])
-        if text != last_text:
+        if force or (text != last_text and (now - last_update_time) > UPDATE_INTERVAL):
             last_text = text
+            last_update_time = now
             await safe_edit(bot, user_id, state["status_message_id"], text, STOP_MARKUP)
 
     async with aiohttp.ClientSession() as session:
         while state.get("running", True):
             users = await fetch_users(session, token)
-            if not users: await update(); break
+            if not users:
+                await update(force=True)
+                break
             blocklist = get_user_blocklist(user_id) if is_blocklist_active(user_id) else set()
             for user in users:
                 if not state.get("running", True): break
                 if user['_id'] in blocklist:
-                    state["skipped_count"] += 1; await update(); continue
+                    state["skipped_count"] += 1
+                    await update()
+                    continue
                 url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                 headers = {"meeff-access-token": token, "Connection": "keep-alive"}
                 async with session.get(url, headers=headers) as resp:
@@ -276,10 +293,10 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                             logging.warning(f"Auto filter update failed: {e}")
                     if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
                     try:
-                        # Send user info card only after the user is added, and include nationality and height
                         await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                     except: pass
-                    await update(); await asyncio.sleep(speed)
+                    await update()
+                    await asyncio.sleep(speed)
             await asyncio.sleep(speed)
     end_time = datetime.now()
     state["finalized"] = True
