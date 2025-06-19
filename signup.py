@@ -40,11 +40,10 @@ def format_user_with_nationality(user):
         f"<b>Last Active:</b> {last_active}\n"
         "Photos: " + ' '.join([f"<a href='{url}'>Photo</a>" for url in user.get('photoUrls', [])])
     )
-    # Attach credentials if present in user
     if "email" in user:
         card += f"\n<b>Email:</b> <code>{user['email']}</code>"
     if "password" in user:
-        card += f"\n<b>Password:</b> <code>{user['password']}</code>"
+        card += f"\n<b>Password:</b> <spoiler><code>{user['password']}</code></spoiler>"
     if "token" in user:
         card += f"\n<b>Token:</b> <code>{user['token']}</code>"
     return card
