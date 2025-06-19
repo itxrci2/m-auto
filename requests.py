@@ -62,9 +62,18 @@ def format_user(user):
         except Exception:
             return "unknown"
     last_active = time_ago(user.get("recentAt"))
+    # Add nationality and height to the card if available
+    nationality = html.escape(user.get('nationalityCode', 'N/A'))
+    height = html.escape(str(user.get('height', 'N/A')))
+    # Some APIs return "163|cm", let's split that for prettier output
+    if "|" in height:
+        height_val, height_unit = height.split("|", 1)
+        height = f"{height_val.strip()} {height_unit.strip()}"
     return (
         f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
         f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
+        f"<b>Nationality:</b> {nationality}\n"
+        f"<b>Height:</b> {height}\n"
         f"<b>Description:</b> {html.escape(user.get('description', 'N/A'))}\n"
         f"<b>Birth Year:</b> {html.escape(str(user.get('birthYear', 'N/A')))}\n"
         f"<b>Platform:</b> {html.escape(user.get('platform', 'N/A'))}\n"
@@ -203,7 +212,9 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                             except Exception as e:
                                 logging.warning(f"Auto filter update failed: {e}")
                         if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
-                        try: await bot.send_message(user_id, format_user(user), parse_mode="HTML")
+                        try:
+                            # Send user info card only after the user is added, and include nationality and height
+                            await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                         except: pass
                         await update(); await asyncio.sleep(speed)
                 await asyncio.sleep(speed)
@@ -264,7 +275,9 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                         except Exception as e:
                             logging.warning(f"Auto filter update failed: {e}")
                     if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
-                    try: await bot.send_message(user_id, format_user(user), parse_mode="HTML")
+                    try:
+                        # Send user info card only after the user is added, and include nationality and height
+                        await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                     except: pass
                     await update(); await asyncio.sleep(speed)
             await asyncio.sleep(speed)
