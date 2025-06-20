@@ -29,8 +29,8 @@ STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 SPEED_LEVELS = {
-    "default": ("Default", 1.0),
-    "medium": ("Medium", 0.5),
+    "default": ("Default", 3.0),
+    "medium": ("Medium", 2.0),
     "turbo": ("Turbo", 0.02)
 }
 
