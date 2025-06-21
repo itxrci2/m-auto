@@ -249,24 +249,30 @@ async def handle_main_message(message: types.Message):
     user_id = message.from_user.id
     state = user_states[user_id]
 
-    # Custom Speed Handler
-    if state.get("awaiting_custom_speed"):
-        await handle_custom_speed_message(message, state, bot, get_tokens, get_current_account)
-        return
-
-    # SIGNUP/SIGNIN message handler (priority, skip token listener if handled)
+    # 1. SIGNUP/SIGNIN message handler (priority, skip everything else if handled)
     if await signup_message_handler(message):
         return
 
-    # Ignore commands (handled elsewhere)
+    # 2. Custom Speed Handler (only if not in signup/signin)
+    if state.get("awaiting_custom_speed"):
+        # Allow user to cancel custom speed
+        if message.text and message.text.strip().lower() == "/cancel":
+            state.pop("awaiting_custom_speed", None)
+            state.pop("pending_speed_mode", None)
+            await message.reply("Custom speed cancelled.")
+            return
+        await handle_custom_speed_message(message, state, bot, get_tokens, get_current_account)
+        return
+
+    # 3. Ignore commands (handled elsewhere)
     if message.text and message.text.startswith("/"):
         return
 
-    # Verify access
+    # 4. Verify access
     if message.from_user.is_bot or not has_valid_access(user_id):
         return
 
-    # Token Handler
+    # 5. Token Handler
     if message.text:
         token_data = message.text.strip().split(" ")
         token = token_data[0]
