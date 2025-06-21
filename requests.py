@@ -30,7 +30,6 @@ STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
 
 SPEED_LEVELS = {
     "default": ("Default", 3.0),
-    "medium": ("Medium", 2.0),
     "turbo": ("Turbo", 0.02)
 }
 
@@ -39,6 +38,7 @@ def get_speed_markup(current_speed=None):
     for key, (title, _) in SPEED_LEVELS.items():
         text = f"{title} {'(Current)' if key == current_speed else ''}"
         buttons.append(InlineKeyboardButton(text=text, callback_data=f"speed_{key}"))
+    buttons.append(InlineKeyboardButton(text="Custom", callback_data="speed_custom"))
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 def format_user(user):
@@ -181,7 +181,6 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
         if state.get("finalized"):
             return
         text = format_progress(accounts, names)
-        # Only update if enough time has passed, or force is True, or the text actually changed
         if force or (text != last_text and (now - last_update_time) > UPDATE_INTERVAL):
             last_text = text
             last_update_time = now
@@ -196,7 +195,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                 if not users:
                     await update(force=True)
                     break
-                blocklist = get_user_blocklist(user_id)  # always skip users in blocklist
+                blocklist = get_user_blocklist(user_id)
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
                     if user['_id'] in blocklist:
@@ -269,7 +268,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
             if not users:
                 await update(force=True)
                 break
-            blocklist = get_user_blocklist(user_id)  # always skip users in blocklist
+            blocklist = get_user_blocklist(user_id)
             for user in users:
                 if not state.get("running", True): break
                 if user['_id'] in blocklist:
@@ -292,7 +291,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                             await update_current_filter(user_id, token)
                         except Exception as e:
                             logging.warning(f"Auto filter update failed: {e}")
-                    if is_blocklist_active(user_id):  # only add if blocklist is ON
+                    if is_blocklist_active(user_id):
                         add_to_blocklist(user_id, user['_id'])
                     try:
                         await bot.send_message(user_id, format_user(user), parse_mode="HTML")
@@ -318,6 +317,70 @@ def run_requests(user_id, state, bot, get_current_account, account_name=None, sp
     token = get_current_account(user_id)
     return run_requests_single(user_id, state, bot, token, account_name or "Current", speed)
 
+async def handle_custom_speed_message(message, state, bot, get_tokens, get_current_account):
+    user_id = message.from_user.id
+    try:
+        speed = float(message.text.strip())
+        if not (0.01 <= speed <= 30):
+            await message.reply("Please enter a value between 0.01 and 30 seconds.")
+            return
+        state.pop("awaiting_custom_speed")
+        mode = state.pop("pending_speed_mode", None)
+        if mode == "current":
+            tokens = get_tokens(user_id)
+            current_token = get_current_account(user_id)
+            account_name = state.pop("pending_account_name", "Current")
+            state.update({"running": True, "finalized": False, "mode": "current", "skipped_count": 0})
+            status_message = await message.answer(
+                format_progress_single(account_name, 0, 0),
+                reply_markup=STOP_MARKUP,
+                parse_mode="HTML"
+            )
+            state["status_message_id"] = status_message.message_id
+            state["pinned_message_id"] = status_message.message_id
+            await bot.pin_chat_message(chat_id=user_id, message_id=state["status_message_id"])
+            await run_requests_single(user_id, state, bot, current_token, account_name, speed)
+            pin_id = state.get("pinned_message_id")
+            if pin_id:
+                try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
+                except: pass
+                state["pinned_message_id"] = None
+            state["running"] = False
+            state.pop("mode", None)
+            state.pop("stopped_by_user", None)
+            state.pop("per_account", None)
+            state.pop("account_names", None)
+        elif mode == "all":
+            tokens = get_tokens(user_id)
+            if not tokens:
+                await message.reply("No accounts found.")
+                return
+            state.update({"running": True, "finalized": False, "mode": "all"})
+            status_msg = await message.answer(
+                format_progress(
+                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
+                    [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
+                ),
+                reply_markup=STOP_MARKUP,
+                parse_mode="HTML"
+            )
+            state["pinned_message_id"] = status_msg.message_id
+            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
+            await run_requests_parallel(user_id, bot, tokens, status_msg.message_id, state, speed)
+            try: await bot.unpin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
+            except: pass
+            state["running"] = False
+            state.pop("mode", None)
+            state.pop("stopped_by_user", None)
+            state.pop("per_account", None)
+            state.pop("account_names", None)
+        else:
+            await message.reply("Speed selection not allowed here.")
+        return
+    except Exception:
+        await message.reply("Invalid speed value. Please send a number like 1.5 for 1.5 seconds.")
+        return
+
 async def handle_requests_callback(
     callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account, start_markup
 ):
@@ -327,12 +390,10 @@ async def handle_requests_callback(
         await callback_query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
         await callback_query.answer()
 
-    # Start menu
     if data == "start":
         await edit("How would you like to send requests?", REQUESTS_CHOICE_MARKUP)
         return True
 
-    # "All" selected
     if data == "requests_all":
         tokens = get_tokens(user_id)
         if not tokens:
@@ -344,17 +405,14 @@ async def handle_requests_callback(
         state["pending_requests_all"] = True
         return True
 
-    # "All" confirm
     if data == "requests_confirm":
         if not state.get("pending_requests_all"):
             await callback_query.answer("Nothing to confirm.")
             return True
-        # After confirm, show speed selection
         state["pending_speed_mode"] = "all"
         await edit("Select speed for requests:", get_speed_markup())
         return True
 
-    # "Current" selected
     if data == "requests_current":
         if state.get("running"):
             await callback_query.answer("Requests are already running!")
@@ -367,16 +425,20 @@ async def handle_requests_callback(
         await edit("Select speed for requests:", get_speed_markup())
         return True
 
-    # Cancel
+    if data == "speed_custom":
+        state["awaiting_custom_speed"] = True
+        await edit("Please send your custom speed in seconds (e.g., 2.0 for 2 seconds between requests):")
+        return True
+
     if data == "requests_cancel":
         state.pop("pending_requests_all", None)
         state.pop("pending_speed_mode", None)
         state.pop("pending_account_name", None)
+        state.pop("awaiting_custom_speed", None)
         await edit("Requests operation cancelled.", start_markup)
         await callback_query.answer("Cancelled.")
         return True
 
-    # Stop requests
     if data == "stop":
         if not state.get("running"):
             await callback_query.answer("Requests are not running!")
@@ -395,7 +457,6 @@ async def handle_requests_callback(
         await callback_query.answer("Stopped.")
         return True
 
-    # SPEED selection (start requests after this)
     if data.startswith("speed_"):
         selected = data.split("_", 1)[1]
         if selected not in SPEED_LEVELS:
