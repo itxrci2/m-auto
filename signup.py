@@ -73,6 +73,29 @@ DEFAULT_PHOTOS = (
     "https://meeffus.s3.amazonaws.com/profile/2025/06/16/20250616052438006_profile-1.0-349bf38c-4555-40cc-a322-e61afe15aa35.jpg"
 )
 
+async def check_email_exists(email):
+    url = "https://api.meeff.com/user/checkEmail/v1"
+    payload = {
+        "email": email,
+        "locale": "en"
+    }
+    headers = {
+        'User-Agent': "okhttp/5.0.0-alpha.14",
+        'Accept-Encoding': "gzip",
+        'Content-Type': "application/json",
+        'content-type': "application/json; charset=utf-8"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            status = resp.status
+            try:
+                resp_json = await resp.json()
+            except Exception:
+                resp_json = {}
+            if status == 406 or resp_json.get("errorCode") == "AlreadyInUse":
+                return False, resp_json.get("errorMessage", "This email address is already in use.")
+            return True, ""
+
 async def signup_command(message: Message):
     user_signup_states[message.chat.id] = {"stage": "menu"}
     await message.answer("Choose an option:", reply_markup=SIGNUP_MENU)
@@ -142,8 +165,13 @@ async def signup_message_handler(message: Message):
 
     # SIGNUP FLOW
     if state.get("stage") == "ask_email":
+        email = message.text.strip()
+        ok, msg = await check_email_exists(email)
+        if not ok:
+            await message.answer(f"{msg}", reply_markup=BACK_TO_SIGNUP)
+            return True
         state["stage"] = "ask_password"
-        state["email"] = message.text.strip()
+        state["email"] = email
         await message.answer("Enter a password for your account:", reply_markup=BACK_TO_SIGNUP)
         return True
     if state.get("stage") == "ask_password":
@@ -374,7 +402,6 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
         account_name = user_data.get("name") if user_data else creds.get("email")
         set_token(user_id, access_token, account_name)
         if user_data:
-            # Attach credentials to user_data so they are included in card
             user_data["email"] = creds.get("email")
             user_data["password"] = creds.get("password")
             user_data["token"] = access_token
