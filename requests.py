@@ -1,521 +1,504 @@
 import asyncio
 import aiohttp
-import html
 import logging
-import json
-import time
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
-from blocklist import is_blocklist_active, add_to_blocklist, get_user_blocklist
-from dateutil import parser
-from datetime import datetime
-from db import get_user_filters
+from datetime import datetime, timedelta
+from collections import defaultdict
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from aiogram.filters import Command
+from aiogram.types.callback_query import CallbackQuery
 
-# --- UI MARKUPS ---
+from db import (
+    set_token, get_tokens, set_current_account, get_current_account,
+    delete_token, set_user_filters, get_user_filters,
+    get_all_tokens, set_account_active,
+    transfer_user_data,
+    set_info_card, get_info_card
+)
+from lounge import send_lounge, lounge_command_handler, handle_lounge_callback
+from chatroom import send_message_to_everyone, chatroom_command_handler, handle_chatroom_callback
+from unsubscribe import unsubscribe_everyone, unsubscribe_command_handler, handle_unsubscribe_callback
+from filters import filter_command, set_filter
+from aio import aio_markup, aio_callback_handler
+from allcountry import run_all_countries, handle_all_countries_callback
+from requests import (
+    handle_requests_callback, REQUESTS_CHOICE_MARKUP,
+    run_requests, run_requests_single, run_requests_parallel,
+    STOP_MARKUP, format_progress_single, format_progress, handle_custom_speed_message
+)
+from blocklist import (
+    blocklist_command, handle_blocklist_callback,
+    is_blocklist_active, add_to_blocklist, get_user_blocklist
+)
+from signup import signup_command, signup_callback_handler, signup_message_handler
 
-REQUESTS_CHOICE_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
+API_TOKEN = "7735279075:AAH_GbPyx4oSh1_1Qn3GYvxNNRr2DEydBgI"
+ADMIN_USER_IDS = [6387028671, 7725409374, 6816341239, 6204011131]
+TEMP_PASSWORD = "11223344"
+password_access = {}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+bot = Bot(token=API_TOKEN)
+router = Router()
+dp = Dispatcher()
+
+user_states = defaultdict(lambda: {
+    "running": False,
+    "status_message_id": None,
+    "pinned_message_id": None,
+    "total_added_friends": 0
+})
+
+def get_tools_markup():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Accounts", callback_data="manage_accounts"),
+            InlineKeyboardButton(text="Filters", callback_data="settings_filters"),
+            InlineKeyboardButton(text="Blocklist", callback_data="settings_blocklist"),
+        ],
+        [
+            InlineKeyboardButton(text="Sign Up", callback_data="signup_go"),
+            InlineKeyboardButton(text="Sign In", callback_data="signin_go"),
+            InlineKeyboardButton(text="Back", callback_data="back_to_menu")
+        ]
+    ])
+
+start_markup = InlineKeyboardMarkup(inline_keyboard=[
     [
-        InlineKeyboardButton(text="Current", callback_data="requests_current"),
-        InlineKeyboardButton(text="All", callback_data="requests_all")
-    ],
-    [InlineKeyboardButton(text="Cancel", callback_data="requests_cancel")]
-])
-REQUESTS_ALL_CONFIRM_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Confirm", callback_data="requests_confirm")],
-    [InlineKeyboardButton(text="Cancel", callback_data="requests_cancel")]
-])
-STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Stop Requests", callback_data="stop")]
+        InlineKeyboardButton(text="Start Requests", callback_data="start"),
+        InlineKeyboardButton(text="All Countries", callback_data="all_countries")
+    ]
 ])
 
-SPEED_LEVELS = {
-    "default": ("Default", 3.0),
-    "turbo": ("Turbo", 0.02)
-}
+back_markup = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
+])
 
-def get_speed_markup(current_speed=None):
-    buttons = []
-    for key, (title, _) in SPEED_LEVELS.items():
-        text = f"{title} {'(Current)' if key == current_speed else ''}"
-        buttons.append(InlineKeyboardButton(text=text, callback_data=f"speed_{key}"))
-    buttons.append(InlineKeyboardButton(text="Custom", callback_data="speed_custom"))
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+def is_admin(user_id):
+    return user_id in ADMIN_USER_IDS
 
-def format_user(user):
-    def time_ago(dt_str):
-        if not dt_str:
-            return "N/A"
-        try:
-            dt = parser.isoparse(dt_str)
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc)
-            diff = now - dt
-            minutes = int(diff.total_seconds() // 60)
-            if minutes < 1:
-                return "just now"
-            elif minutes < 60:
-                return f"{minutes} min ago"
-            hours = minutes // 60
-            if hours < 24:
-                return f"{hours} hr ago"
-            days = hours // 24
-            return f"{days} day(s) ago"
-        except Exception:
-            return "unknown"
-    last_active = time_ago(user.get("recentAt"))
-    nationality = html.escape(user.get('nationalityCode', 'N/A'))
-    height = html.escape(str(user.get('height', 'N/A')))
-    if "|" in height:
-        height_val, height_unit = height.split("|", 1)
-        height = f"{height_val.strip()} {height_unit.strip()}"
-    return (
-        f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
-        f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
-        f"<b>Nationality:</b> {nationality}\n"
-        f"<b>Height:</b> {height}\n"
-        f"<b>Description:</b> {html.escape(user.get('description', 'N/A'))}\n"
-        f"<b>Birth Year:</b> {html.escape(str(user.get('birthYear', 'N/A')))}\n"
-        f"<b>Platform:</b> {html.escape(user.get('platform', 'N/A'))}\n"
-        f"<b>Profile Score:</b> {html.escape(str(user.get('profileScore', 'N/A')))}\n"
-        f"<b>Distance:</b> {html.escape(str(user.get('distance', 'N/A')))} km\n"
-        f"<b>Language Codes:</b> {html.escape(', '.join(user.get('languageCodes', [])))}\n"
-        f"<b>Last Active:</b> {last_active}\n"
-        "Photos: " + ' '.join([f"<a href='{html.escape(url)}'>Photo</a>" for url in user.get('photoUrls', [])])
-    )
-
-async def fetch_users(session, token):
-    url = "https://api.meeff.com/user/explore/v2/?lat=33.589510&lng=-117.860909"
-    headers = {"meeff-access-token": token, "Connection": "keep-alive"}
-    async with session.get(url, headers=headers) as response:
-        return (await response.json()).get("users", [])
-
-def format_time_used(start_time, end_time):
-    delta = end_time - start_time
-    total_seconds = int(delta.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
-
-def format_progress(accounts, names):
-    lines = ["🟢 <b>All Accounts Progress</b>"]
-    for i, acc in enumerate(accounts):
-        s = f"{i+1}. {names[i]}: {acc['added']} sent, {acc['skipped']} skipped"
-        if acc.get("exceeded"): s += " <b>(Exceeded)</b>"
-        lines.append(s)
-    lines.append("\n⏳ Processing... (Press Stop to interrupt)")
-    return "\n".join(lines)
-
-def format_result(accounts, names, start_time, end_time, finished_by_user=False):
-    lines = ["✅ <b>All Requests Completed</b>" if not finished_by_user else "⛔️ <b>Requests Stopped by User</b>"]
-    for i, acc in enumerate(accounts):
-        s = f"{i+1}. {names[i]}: {acc['added']} sent, {acc['skipped']} skipped"
-        if acc.get("exceeded"): s += " <b>(Exceeded)</b>"
-        lines.append(s)
-    lines.append(f"⏱️ Time used: {format_time_used(start_time, end_time)}")
-    return "\n".join(lines)
-
-def format_progress_single(account_name, added, skipped):
-    return (
-        f"🟢 <b>Current Progress</b>\n"
-        f"Account: {account_name}\n"
-        f"├ Sent: {added}\n"
-        f"└ Skipped: {skipped}\n"
-        "\n⏳ Processing... (Press Stop to interrupt)"
-    )
-
-def format_result_single(account_name, added, skipped, start_time, end_time, like_exceeded=False, finished_by_user=False):
-    status = "✅ <b>Requests Completed</b>" if not finished_by_user else "⛔️ <b>Requests Stopped by User</b>"
-    extra = "\n<b>Like limit exceeded!</b>" if like_exceeded else ""
-    return (
-        f"{status}\n"
-        f"Account: {account_name}{extra}\n"
-        f"\n• Total Sent: {added}"
-        f"\n• Skipped: {skipped}"
-        f"\n⏱️ Time used: {format_time_used(start_time, end_time)}"
-    )
-
-async def safe_edit(bot, chat_id, msg_id, text, markup=None):
-    try:
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=markup, parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e): pass
-        else: logging.warning(f"edit_message_text error: {e}")
-    except Exception as e:
-        logging.warning(f"edit_message_text unknown error: {e}")
-
-async def update_current_filter(user_id, token):
-    filters = get_user_filters(user_id, token)
-    if not filters:
-        return  # nothing to update
-    headers = {
-        'User-Agent': "okhttp/4.12.0",
-        'Accept-Encoding': "gzip",
-        'meeff-access-token': token,
-        'content-type': "application/json; charset=utf-8"
-    }
-    url = "https://api.meeff.com/user/updateFilter/v1"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=json.dumps(filters), headers=headers) as response:
-            if response.status != 200:
-                resp_text = await response.text()
-                logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
-
-async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
-    start_time = datetime.now()
-    accounts = [{"added":0, "skipped":0, "exceeded":False, "running":True} for _ in tokens]
-    names = [tok.get("name", f"Account {i+1}") for i, tok in enumerate(tokens)]
-    state["per_account"] = accounts
-    state["account_names"] = names
-    last_text = None
-    last_update_time = 0
-    UPDATE_INTERVAL = 2  # seconds
-
-    async def update(force=False):
-        nonlocal last_text, last_update_time
-        now = time.time()
-        if state.get("finalized"):
-            return
-        text = format_progress(accounts, names)
-        if force or (text != last_text and (now - last_update_time) > UPDATE_INTERVAL):
-            last_text = text
-            last_update_time = now
-            await safe_edit(bot, user_id, status_message_id, text, STOP_MARKUP)
-
-    async def worker(i, token):
-        acc = accounts[i]
-        sent_since_last_filter_update = 0
-        async with aiohttp.ClientSession() as session:
-            while acc["running"] and state.get("running", True):
-                users = await fetch_users(session, token["token"])
-                if not users:
-                    await update(force=True)
-                    break
-                blocklist = get_user_blocklist(user_id)
-                for user in users:
-                    if not acc["running"] or not state.get("running", True): break
-                    if user['_id'] in blocklist:
-                        acc["skipped"] += 1
-                        await update()
-                        continue
-                    url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
-                    headers = {"meeff-access-token": token["token"], "Connection": "keep-alive"}
-                    async with session.get(url, headers=headers) as resp:
-                        data = await resp.json()
-                        if data.get("errorCode") == "LikeExceeded":
-                            acc["exceeded"] = True
-                            acc["running"] = False
-                            await update(force=True)
-                            return
-                        acc["added"] += 1
-                        sent_since_last_filter_update += 1
-                        if sent_since_last_filter_update >= 7:
-                            sent_since_last_filter_update = 0
-                            try:
-                                await update_current_filter(user_id, token["token"])
-                            except Exception as e:
-                                logging.warning(f"Auto filter update failed: {e}")
-                        if is_blocklist_active(user_id):  # only add if blocklist is ON
-                            add_to_blocklist(user_id, user['_id'])
-                        try:
-                            await bot.send_message(user_id, format_user(user), parse_mode="HTML")
-                        except: pass
-                        await update()
-                        await asyncio.sleep(speed)
-                await asyncio.sleep(speed)
-            await update(force=True)
-
-    state["finalized"] = False
-    await safe_edit(bot, user_id, status_message_id, format_progress(accounts, names), STOP_MARKUP)
-    await asyncio.gather(*(worker(idx, tok) for idx, tok in enumerate(tokens)))
-    end_time = datetime.now()
-    state["finalized"] = True
-    await safe_edit(
-        bot,
-        user_id,
-        status_message_id,
-        format_result(accounts, names, start_time, end_time, finished_by_user=state.get("stopped_by_user", False)),
-    )
-
-async def run_requests_single(user_id, state, bot, token, account_name, speed):
-    start_time = datetime.now()
-    state["total_added_friends"] = 0
-    state["skipped_count"] = 0
-    last_text = None
-    last_update_time = 0
-    UPDATE_INTERVAL = 2  # seconds
-    like_exceeded = False
-    sent_since_last_filter_update = 0
-
-    async def update(force=False):
-        nonlocal last_text, last_update_time
-        now = time.time()
-        if state.get("finalized"):
-            return
-        text = format_progress_single(account_name, state["total_added_friends"], state["skipped_count"])
-        if force or (text != last_text and (now - last_update_time) > UPDATE_INTERVAL):
-            last_text = text
-            last_update_time = now
-            await safe_edit(bot, user_id, state["status_message_id"], text, STOP_MARKUP)
-
-    async with aiohttp.ClientSession() as session:
-        while state.get("running", True):
-            users = await fetch_users(session, token)
-            if not users:
-                await update(force=True)
-                break
-            blocklist = get_user_blocklist(user_id)
-            for user in users:
-                if not state.get("running", True): break
-                if user['_id'] in blocklist:
-                    state["skipped_count"] += 1
-                    await update()
-                    continue
-                url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
-                headers = {"meeff-access-token": token, "Connection": "keep-alive"}
-                async with session.get(url, headers=headers) as resp:
-                    data = await resp.json()
-                    if data.get("errorCode") == "LikeExceeded":
-                        like_exceeded = True
-                        state["running"] = False
-                        break
-                    state["total_added_friends"] += 1
-                    sent_since_last_filter_update += 1
-                    if sent_since_last_filter_update >= 7:
-                        sent_since_last_filter_update = 0
-                        try:
-                            await update_current_filter(user_id, token)
-                        except Exception as e:
-                            logging.warning(f"Auto filter update failed: {e}")
-                    if is_blocklist_active(user_id):
-                        add_to_blocklist(user_id, user['_id'])
-                    try:
-                        await bot.send_message(user_id, format_user(user), parse_mode="HTML")
-                    except: pass
-                    await update()
-                    await asyncio.sleep(speed)
-            await asyncio.sleep(speed)
-    end_time = datetime.now()
-    state["finalized"] = True
-    await safe_edit(
-        bot, user_id, state["status_message_id"],
-        format_result_single(
-            account_name,
-            state['total_added_friends'],
-            state['skipped_count'],
-            start_time, end_time,
-            like_exceeded=like_exceeded,
-            finished_by_user=state.get("stopped_by_user", False)
-        )
-    )
-
-def run_requests(user_id, state, bot, get_current_account, account_name=None, speed=1.0):
-    token = get_current_account(user_id)
-    return run_requests_single(user_id, state, bot, token, account_name or "Current", speed)
-
-async def handle_custom_speed_message(message, state, bot, get_tokens, get_current_account):
-    user_id = message.from_user.id
-    try:
-        speed = float(message.text.strip())
-        if not (0.01 <= speed <= 30):
-            await message.reply("Please enter a value between 0.01 and 30 seconds.")
-            return
-        state.pop("awaiting_custom_speed")
-        mode = state.pop("pending_speed_mode", None)
-        if mode == "current":
-            tokens = get_tokens(user_id)
-            current_token = get_current_account(user_id)
-            account_name = state.pop("pending_account_name", "Current")
-            state.update({"running": True, "finalized": False, "mode": "current", "skipped_count": 0})
-            status_message = await message.answer(
-                format_progress_single(account_name, 0, 0),
-                reply_markup=STOP_MARKUP,
-                parse_mode="HTML"
-            )
-            state["status_message_id"] = status_message.message_id
-            state["pinned_message_id"] = status_message.message_id
-            await bot.pin_chat_message(chat_id=user_id, message_id=state["status_message_id"])
-            await run_requests_single(user_id, state, bot, current_token, account_name, speed)
-            pin_id = state.get("pinned_message_id")
-            if pin_id:
-                try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
-                except: pass
-                state["pinned_message_id"] = None
-            state["running"] = False
-            state.pop("mode", None)
-            state.pop("stopped_by_user", None)
-            state.pop("per_account", None)
-            state.pop("account_names", None)
-        elif mode == "all":
-            tokens = get_tokens(user_id)
-            if not tokens:
-                await message.reply("No accounts found.")
-                return
-            state.update({"running": True, "finalized": False, "mode": "all"})
-            status_msg = await message.answer(
-                format_progress(
-                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
-                    [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
-                ),
-                reply_markup=STOP_MARKUP,
-                parse_mode="HTML"
-            )
-            state["pinned_message_id"] = status_msg.message_id
-            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-            await run_requests_parallel(user_id, bot, tokens, status_msg.message_id, state, speed)
-            try: await bot.unpin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-            except: pass
-            state["running"] = False
-            state.pop("mode", None)
-            state.pop("stopped_by_user", None)
-            state.pop("per_account", None)
-            state.pop("account_names", None)
-        else:
-            await message.reply("Speed selection not allowed here.")
-        return
-    except Exception:
-        await message.reply("Invalid speed value. Please send a number like 1.5 for 1.5 seconds.")
-        return
-
-async def handle_requests_callback(
-    callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account, start_markup
-):
-    data = callback_query.data
-
-    async def edit(text, markup=None):
-        await callback_query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
-        await callback_query.answer()
-
-    if data == "start":
-        await edit("How would you like to send requests?", REQUESTS_CHOICE_MARKUP)
+def has_valid_access(user_id):
+    if is_admin(user_id):
         return True
-
-    if data == "requests_all":
-        tokens = get_tokens(user_id)
-        if not tokens:
-            await edit("No accounts found.", start_markup)
-            return True
-        text = "You chose to run requests for ALL accounts. Press Confirm to proceed.\n\nAccounts to process:\n"
-        text += "\n".join(f"{i+1}. {tok.get('name', f'Account {i+1}')}" for i, tok in enumerate(tokens))
-        await edit(text, REQUESTS_ALL_CONFIRM_MARKUP)
-        state["pending_requests_all"] = True
+    if user_id in password_access and password_access[user_id] > datetime.now():
         return True
-
-    if data == "requests_confirm":
-        if not state.get("pending_requests_all"):
-            await callback_query.answer("Nothing to confirm.")
-            return True
-        state["pending_speed_mode"] = "all"
-        await edit("Select speed for requests:", get_speed_markup())
-        return True
-
-    if data == "requests_current":
-        if state.get("running"):
-            await callback_query.answer("Requests are already running!")
-            return True
-        tokens = get_tokens(user_id)
-        current_token = get_current_account(user_id)
-        account_name = next((tok.get("name", "Current") for tok in tokens if tok["token"] == current_token), "Current")
-        state["pending_speed_mode"] = "current"
-        state["pending_account_name"] = account_name
-        await edit("Select speed for requests:", get_speed_markup())
-        return True
-
-    if data == "speed_custom":
-        state["awaiting_custom_speed"] = True
-        await edit("Please send your custom speed in seconds (e.g., 2.0 for 2 seconds between requests):")
-        return True
-
-    if data == "requests_cancel":
-        state.pop("pending_requests_all", None)
-        state.pop("pending_speed_mode", None)
-        state.pop("pending_account_name", None)
-        state.pop("awaiting_custom_speed", None)
-        await edit("Requests operation cancelled.", start_markup)
-        await callback_query.answer("Cancelled.")
-        return True
-
-    if data == "stop":
-        if not state.get("running"):
-            await callback_query.answer("Requests are not running!")
-            return True
-        if state.get("finalized"):
-            await callback_query.answer("Stopped.")
-            return True
-        state["finalized"] = True
-        state["running"] = False
-        state["stopped_by_user"] = True
-        pin_id = state.get("pinned_message_id")
-        if pin_id:
-            try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
-            except: pass
-            state["pinned_message_id"] = None
-        await callback_query.answer("Stopped.")
-        return True
-
-    if data.startswith("speed_"):
-        selected = data.split("_", 1)[1]
-        if selected not in SPEED_LEVELS:
-            await edit("Unknown speed selected.")
-            return True
-        speed_value = SPEED_LEVELS[selected][1]
-        mode = state.pop("pending_speed_mode", None)
-        if mode == "current":
-            tokens = get_tokens(user_id)
-            current_token = get_current_account(user_id)
-            account_name = state.pop("pending_account_name", "Current")
-            state.update({"running": True, "finalized": False, "mode": "current", "skipped_count": 0})
-            status_message = await callback_query.message.edit_text(
-                format_progress_single(account_name, 0, 0),
-                reply_markup=STOP_MARKUP,
-                parse_mode="HTML"
-            )
-            state["status_message_id"] = status_message.message_id
-            state["pinned_message_id"] = status_message.message_id
-            await bot.pin_chat_message(chat_id=user_id, message_id=state["status_message_id"])
-            await run_requests_single(user_id, state, bot, current_token, account_name, speed_value)
-            pin_id = state.get("pinned_message_id")
-            if pin_id:
-                try: await bot.unpin_chat_message(chat_id=user_id, message_id=pin_id)
-                except: pass
-                state["pinned_message_id"] = None
-            state["running"] = False
-            state.pop("mode", None)
-            state.pop("stopped_by_user", None)
-            state.pop("per_account", None)
-            state.pop("account_names", None)
-            return True
-        elif mode == "all":
-            tokens = get_tokens(user_id)
-            if not tokens:
-                await edit("No accounts found.")
-                return True
-            state.update({"running": True, "finalized": False, "mode": "all"})
-            status_msg = await callback_query.message.edit_text(
-                format_progress(
-                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
-                    [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
-                ),
-                reply_markup=STOP_MARKUP,
-                parse_mode="HTML"
-            )
-            state["pinned_message_id"] = status_msg.message_id
-            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-            await run_requests_parallel(user_id, bot, tokens, status_msg.message_id, state, speed_value)
-            try: await bot.unpin_chat_message(chat_id=user_id, message_id=status_msg.message_id)
-            except: pass
-            state["running"] = False
-            state.pop("mode", None)
-            state.pop("stopped_by_user", None)
-            state.pop("per_account", None)
-            state.pop("account_names", None)
-            return True
-        else:
-            await edit("Speed selection not allowed here.")
-            return True
-
     return False
+
+@router.message(Command("password"))
+async def password_command(message: types.Message):
+    user_id = message.chat.id
+    args = message.text.strip().split()
+    if len(args) < 2:
+        await message.reply("Please provide the password. Usage: /password <password>")
+        return
+    if args[1] == TEMP_PASSWORD:
+        password_access[user_id] = datetime.now() + timedelta(hours=1)
+        await message.reply("Access granted for one hour.")
+        await bot.delete_message(chat_id=user_id, message_id=message.message_id)
+    else:
+        await message.reply("Incorrect password.")
+
+@router.message(Command("start"))
+async def start_command(message: types.Message):
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    state = user_states[message.chat.id]
+    status = await message.answer("Welcome! Use the button below to start requests.", reply_markup=start_markup)
+    state["status_message_id"] = status.message_id
+    state["pinned_message_id"] = None
+
+@router.message(Command("tools"))
+async def tools_command(message: types.Message):
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    await message.answer("Accounts & Tools menu. Choose an option below:", reply_markup=get_tools_markup())
+
+@router.message(Command("chatroom"))
+async def chatroom_command(message: types.Message):
+    await chatroom_command_handler(
+        message, has_valid_access, get_current_account, get_tokens, user_states
+    )
+
+@router.message(Command("skip"))
+async def unsubscribe_command(message: types.Message):
+    await unsubscribe_command_handler(
+        message, has_valid_access, get_current_account, get_tokens, user_states
+    )
+
+@router.message(Command("lounge"))
+async def lounge_command(message: types.Message):
+    await lounge_command_handler(
+        message, has_valid_access, get_current_account, user_states
+    )
+
+@router.message(Command("invoke"))
+async def invoke_command(message: types.Message):
+    user_id = message.chat.id
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    tokens = get_tokens(user_id)
+    if not tokens:
+        await message.reply("No tokens found.")
+        return
+    disabled_accounts = []
+    url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
+    params = {'locale': "en"}
+    async with aiohttp.ClientSession() as session:
+        for token_obj in tokens:
+            token = token_obj["token"]
+            headers = {
+                'User-Agent': "okhttp/5.0.0-alpha.14",
+                'Accept-Encoding': "gzip",
+                'meeff-access-token': token
+            }
+            try:
+                async with session.get(url, params=params, headers=headers) as resp:
+                    result = await resp.json(content_type=None)
+                    if result.get("errorCode") == "AuthRequired":
+                        disabled_accounts.append(token_obj)
+            except Exception as e:
+                logging.error(f"Error checking token {token_obj.get('name')}: {e}")
+                disabled_accounts.append(token_obj)
+    if disabled_accounts:
+        for token_obj in disabled_accounts:
+            delete_token(user_id, token_obj["token"])
+            await message.reply(f"Deleted disabled token for account: {token_obj['name']}")
+    else:
+        await message.reply("All accounts are working.")
+
+@router.message(Command("add"))
+async def add_person_command(message: types.Message):
+    user_id = message.chat.id
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    args = message.text.strip().split()
+    if len(args) < 2:
+        await message.reply("Please provide the person ID. Usage: /add <person_id>")
+        return
+    person_id = args[1]
+    token = get_current_account(user_id)
+    if not token:
+        await message.reply("No active account found. Please set an account first.")
+        return
+    url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={person_id}&isOkay=1"
+    headers = {"meeff-access-token": token, "Connection": "keep-alive"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                data = await response.json()
+                if data.get("errorCode") == "LikeExceeded":
+                    await message.reply("You've reached the daily like limit.")
+                elif data.get("errorCode"):
+                    await message.reply(f"Failed: {data.get('errorMessage', 'Unknown error')}")
+                else:
+                    await message.reply(f"Successfully added person with ID: {person_id}")
+    except Exception as e:
+        logging.error(f"Error adding person by ID: {e}")
+        await message.reply("An error occurred while trying to add this person.")
+
+@router.message(Command("block"))
+async def blockadd_command(message: types.Message):
+    user_id = message.chat.id
+    args = message.text.strip().split()
+    if len(args) < 2:
+        await message.reply("Usage: /blockadd <user_id>")
+        return
+    block_id = args[1]
+    blocklist = get_user_blocklist(user_id)
+    if block_id in blocklist:
+        await message.reply(f"User ID {block_id} is already in your blocklist.")
+        return
+    add_to_blocklist(user_id, block_id)
+    await message.reply(f"User ID {block_id} has been added to your blocklist.")
+
+@router.message(Command("aio"))
+async def aio_command(message: types.Message):
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    await message.answer("Choose an action:", reply_markup=aio_markup)
+
+@router.message(Command("transfer"))
+async def transfer_command(message: types.Message):
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized to use this bot.")
+        return
+    args = message.text.strip().split()
+    if len(args) < 2:
+        await message.reply("Usage: /transfer <destination_user_id>")
+        return
+    try:
+        to_user_id = int(args[1])
+    except Exception:
+        await message.reply("Invalid user ID format.")
+        return
+    from_user_id = message.chat.id
+    if to_user_id == from_user_id:
+        await message.reply("You cannot transfer to your own account.")
+        return
+    transfer_user_data(from_user_id, to_user_id)
+    await message.reply(f"All Meeff tokens and settings have been transferred to user ID {to_user_id}.")
+
+@router.message()
+async def handle_main_message(message: types.Message):
+    user_id = message.from_user.id
+    state = user_states[user_id]
+
+    # 1. SIGNUP/SIGNIN message handler (priority, skip everything else if handled)
+    if await signup_message_handler(message):
+        return
+
+    # 2. Custom Speed Handler (only if not in signup/signin)
+    if state.get("awaiting_custom_speed"):
+        # Allow user to cancel custom speed
+        if message.text and message.text.strip().lower() == "/cancel":
+            state.pop("awaiting_custom_speed", None)
+            state.pop("pending_speed_mode", None)
+            await message.reply("Custom speed cancelled.")
+            return
+        await handle_custom_speed_message(message, state, bot, get_tokens, get_current_account)
+        return
+
+    # 3. Ignore commands (handled elsewhere)
+    if message.text and message.text.startswith("/"):
+        return
+
+    # 4. Verify access
+    if message.from_user.is_bot or not has_valid_access(user_id):
+        return
+
+    # 5. Token Handler
+    if message.text:
+        token_data = message.text.strip().split(" ")
+        token = token_data[0]
+        if len(token) < 10:
+            await message.reply("Invalid token. Please try again.")
+            return
+        url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
+        params = {'locale': "en"}
+        headers = {
+            'User-Agent': "okhttp/5.0.0-alpha.14",
+            'Accept-Encoding': "gzip",
+            'meeff-access-token': token
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, params=params, headers=headers) as resp:
+                    result = await resp.json(content_type=None)
+                    if result.get("errorCode") == "AuthRequired":
+                        await message.reply("The token you provided is invalid or disabled. Please try a different token.")
+                        return
+            except Exception as e:
+                logging.error(f"Error verifying token: {e}")
+                await message.reply("Error verifying the token. Please try again.")
+                return
+        tokens = get_tokens(user_id)
+        account_name = " ".join(token_data[1:]) if len(token_data) > 1 else f"Account {len(tokens) + 1}"
+        set_token(user_id, token, account_name, None)
+        await message.reply(f"Your access token has been verified and saved as {account_name}. Use the menu to manage accounts.")
+    else:
+        await message.reply("Message text is empty. Please provide a valid token.")
+
+@router.callback_query()
+async def callback_handler(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = user_states[user_id]
+    if not has_valid_access(user_id):
+        await callback_query.answer("You are not authorized to use this bot.")
+        return
+
+    # --- SIGNUP/SIGNIN CALLS (priority) ---
+    if await signup_callback_handler(callback_query):
+        return
+
+    # Blocklist first
+    if await handle_blocklist_callback(callback_query):
+        return
+
+    # Unsubscribe
+    if await handle_unsubscribe_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, unsubscribe_everyone): return
+    # Chatroom
+    if await handle_chatroom_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_message_to_everyone): return
+    # Lounge
+    if await handle_lounge_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_lounge): return
+    # AIO
+    if callback_query.data.startswith("aio_"):
+        await aio_callback_handler(callback_query)
+        return
+    # All Countries
+    if await handle_all_countries_callback(
+        callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account,
+        run_all_countries, start_markup
+    ): return
+    # Requests (with speed markup support)
+    if await handle_requests_callback(
+        callback_query, state, bot, user_id, get_current_account, get_tokens,
+        set_current_account, start_markup
+    ): return
+
+    # Tools: manage accounts, filters, blocklist, and sign up/in
+    if callback_query.data == "manage_accounts":
+        tokens = get_all_tokens(user_id)
+        current_token = get_current_account(user_id)
+        if not tokens:
+            await callback_query.message.edit_text("No accounts saved. Send a new token to add an account.", reply_markup=back_markup)
+            return
+        buttons = []
+        for i, token in enumerate(tokens):
+            is_current = (token['token'] == current_token)
+            row = [
+                InlineKeyboardButton(
+                    text=f"{token['name']} {'(Current)' if is_current else ''}",
+                    callback_data=f"set_account_{i}"
+                ),
+                InlineKeyboardButton(
+                    text="Delete", callback_data=f"delete_account_{i}"
+                ),
+                InlineKeyboardButton(
+                    text="On" if token.get("active", True) else "Off",
+                    callback_data=f"toggle_account_{i}"
+                ),
+                InlineKeyboardButton(
+                    text="View", callback_data=f"view_account_{i}"
+                ),
+            ]
+            buttons.append(row)
+        buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
+        await callback_query.message.edit_text(
+            "Manage your accounts:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+    elif callback_query.data.startswith("set_account_"):
+        index = int(callback_query.data.split("_")[-1])
+        tokens = get_all_tokens(user_id)
+        if index < len(tokens):
+            if not tokens[index].get("active", True):
+                await callback_query.answer("This account is turned off. Turn it on to activate.")
+                return
+            set_current_account(user_id, tokens[index]["token"])
+            # Refresh the accounts menu with updated (Current) status and stay on the menu
+            tokens = get_all_tokens(user_id)
+            current_token = get_current_account(user_id)
+            buttons = []
+            for i, token in enumerate(tokens):
+                is_current = (token['token'] == current_token)
+                row = [
+                    InlineKeyboardButton(
+                        text=f"{token['name']} {'(Current)' if is_current else ''}",
+                        callback_data=f"set_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="Delete", callback_data=f"delete_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="On" if token.get("active", True) else "Off",
+                        callback_data=f"toggle_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="View", callback_data=f"view_account_{i}"
+                    ),
+                ]
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
+            await callback_query.message.edit_text(
+                "Manage your accounts:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif callback_query.data.startswith("delete_account_"):
+        index = int(callback_query.data.split("_")[-1])
+        tokens = get_all_tokens(user_id)
+        if index < len(tokens):
+            delete_token(user_id, tokens[index]["token"])
+            await callback_query.message.edit_text("Account has been deleted.", reply_markup=back_markup)
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif callback_query.data.startswith("toggle_account_"):
+        index = int(callback_query.data.split("_")[-1])
+        tokens = get_all_tokens(user_id)
+        if index < len(tokens):
+            current_status = tokens[index].get("active", True)
+            set_account_active(user_id, tokens[index]["token"], not current_status)
+            tokens = get_all_tokens(user_id)
+            current_token = get_current_account(user_id)
+            buttons = []
+            for i, token in enumerate(tokens):
+                is_current = (token['token'] == current_token)
+                row = [
+                    InlineKeyboardButton(
+                        text=f"{token['name']} {'(Current)' if is_current else ''}",
+                        callback_data=f"set_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="Delete", callback_data=f"delete_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="On" if token.get("active", True) else "Off",
+                        callback_data=f"toggle_account_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="View", callback_data=f"view_account_{i}"
+                    ),
+                ]
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
+            await callback_query.message.edit_text(
+                "Manage your accounts:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif callback_query.data.startswith("view_account_"):
+        index = int(callback_query.data.split("_")[-1])
+        tokens = get_all_tokens(user_id)
+        if index < len(tokens):
+            token_str = tokens[index]["token"]
+            info_card = get_info_card(user_id, token_str)
+            if info_card:
+                await callback_query.message.answer(info_card, parse_mode="HTML", disable_web_page_preview=False)
+            else:
+                await callback_query.answer("No information card found for this account.")
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif callback_query.data == "settings_filters":
+        await filter_command(callback_query.message, edit=True)
+    elif callback_query.data == "settings_blocklist":
+        await blocklist_command(callback_query, edit=True)
+    elif callback_query.data == "back_to_menu":
+        try:
+            await callback_query.message.edit_text("Accounts & Tools menu. Choose an option below:", reply_markup=get_tools_markup())
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                raise
+    if callback_query.data.startswith("filter_"):
+        await set_filter(callback_query)
+
+async def set_bot_commands():
+    commands = [
+        BotCommand(command="start", description="Start the bot"),
+        BotCommand(command="lounge", description="Send message to everyone in the lounge"),
+        BotCommand(command="chatroom", description="Send a message to everyone in all chatrooms"),
+        BotCommand(command="add", description="Manually add a person by ID"),
+        BotCommand(command="block", description="Manually block a user ID"),
+        BotCommand(command="aio", description="Show aio commands"),
+        BotCommand(command="invoke", description="Verify and remove disabled accounts"),
+        BotCommand(command="skip", description="Unsubscribe from all chatrooms"),
+        BotCommand(command="tools", description="Accounts & Tools"),
+        BotCommand(command="password", description="Enter password for temporary access"),
+        BotCommand(command="transfer", description="Transfer all tokens/settings to another Telegram user"),
+    ]
+    await bot.set_my_commands(commands)
+
+async def main():
+    await set_bot_commands()
+    dp.include_router(router)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
