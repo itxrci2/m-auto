@@ -196,7 +196,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                 if not users:
                     await update(force=True)
                     break
-                blocklist = get_user_blocklist(user_id) if is_blocklist_active(user_id) else set()
+                blocklist = get_user_blocklist(user_id)  # always skip users in blocklist
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
                     if user['_id'] in blocklist:
@@ -220,7 +220,8 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                                 await update_current_filter(user_id, token["token"])
                             except Exception as e:
                                 logging.warning(f"Auto filter update failed: {e}")
-                        if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
+                        if is_blocklist_active(user_id):  # only add if blocklist is ON
+                            add_to_blocklist(user_id, user['_id'])
                         try:
                             await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                         except: pass
@@ -268,7 +269,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
             if not users:
                 await update(force=True)
                 break
-            blocklist = get_user_blocklist(user_id) if is_blocklist_active(user_id) else set()
+            blocklist = get_user_blocklist(user_id)  # always skip users in blocklist
             for user in users:
                 if not state.get("running", True): break
                 if user['_id'] in blocklist:
@@ -291,7 +292,8 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                             await update_current_filter(user_id, token)
                         except Exception as e:
                             logging.warning(f"Auto filter update failed: {e}")
-                    if is_blocklist_active(user_id): add_to_blocklist(user_id, user['_id'])
+                    if is_blocklist_active(user_id):  # only add if blocklist is ON
+                        add_to_blocklist(user_id, user['_id'])
                     try:
                         await bot.send_message(user_id, format_user(user), parse_mode="HTML")
                     except: pass
