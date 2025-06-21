@@ -1,7 +1,7 @@
 import aiohttp
 import json
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from db import set_token, get_tokens
+from db import set_token, get_tokens, set_info_card, get_info_card  # <-- import info card functions!
 from requests import format_user
 
 def format_user_with_nationality(user):
@@ -396,16 +396,19 @@ async def try_signin(email, password):
 async def store_token_and_show_card(msg_obj, login_result, creds):
     access_token = login_result.get("accessToken")
     user_data = login_result.get("user")
+    email = creds.get("email")
     if access_token:
         user_id = msg_obj.chat.id
         tokens = get_tokens(user_id)
         account_name = user_data.get("name") if user_data else creds.get("email")
-        set_token(user_id, access_token, account_name)
+        # Overwrite token/info_card for the same email
+        set_token(user_id, access_token, account_name, email)
         if user_data:
             user_data["email"] = creds.get("email")
             user_data["password"] = creds.get("password")
             user_data["token"] = access_token
             text = format_user_with_nationality(user_data)
+            set_info_card(user_id, access_token, text, email)
             await msg_obj.edit_text("Account signed in and saved!\n" + text, parse_mode="HTML")
         else:
             await msg_obj.edit_text("Account signed in and saved! (Email not verified, info not available yet.)")
