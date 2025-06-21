@@ -21,7 +21,11 @@ from unsubscribe import unsubscribe_everyone, unsubscribe_command_handler, handl
 from filters import filter_command, set_filter
 from aio import aio_markup, aio_callback_handler
 from allcountry import run_all_countries, handle_all_countries_callback
-from requests import handle_requests_callback, REQUESTS_CHOICE_MARKUP, run_requests
+from requests import (
+    handle_requests_callback, REQUESTS_CHOICE_MARKUP,
+    run_requests, run_requests_single, run_requests_parallel,
+    STOP_MARKUP, format_progress_single, format_progress, handle_custom_speed_message
+)
 from blocklist import (
     blocklist_command, handle_blocklist_callback,
     is_blocklist_active, add_to_blocklist, get_user_blocklist
@@ -241,15 +245,28 @@ async def transfer_command(message: types.Message):
     await message.reply(f"All Meeff tokens and settings have been transferred to user ID {to_user_id}.")
 
 @router.message()
-async def handle_new_token(message: types.Message):
+async def handle_main_message(message: types.Message):
+    user_id = message.from_user.id
+    state = user_states[user_id]
+
+    # Custom Speed Handler
+    if state.get("awaiting_custom_speed"):
+        await handle_custom_speed_message(message, state, bot, get_tokens, get_current_account)
+        return
+
     # SIGNUP/SIGNIN message handler (priority, skip token listener if handled)
     if await signup_message_handler(message):
         return
+
+    # Ignore commands (handled elsewhere)
     if message.text and message.text.startswith("/"):
         return
-    user_id = message.from_user.id
+
+    # Verify access
     if message.from_user.is_bot or not has_valid_access(user_id):
         return
+
+    # Token Handler
     if message.text:
         token_data = message.text.strip().split(" ")
         token = token_data[0]
