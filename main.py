@@ -93,7 +93,7 @@ def build_accounts_buttons(tokens, current_token):
         cc = filters.get("filterNationalityCode") if filters else ""
         name = token['name']
         if cc:
-            name = f"{name}| {cc}"
+            name = f"{name} | {cc}"
         if is_current:
             name = f"> {name}"
         row = [
