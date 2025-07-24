@@ -85,6 +85,27 @@ def has_valid_access(user_id):
         return True
     return False
 
+def build_accounts_buttons(tokens, current_token):
+    buttons = []
+    for i, token in enumerate(tokens):
+        is_current = (token['token'] == current_token)
+        filters = token.get("filters", {})
+        cc = filters.get("filterNationalityCode") if filters else ""
+        name = token['name']
+        if cc:
+            name = f"{name}| {cc}"
+        if is_current:
+            name = f"> {name}"
+        row = [
+            InlineKeyboardButton(text=name, callback_data=f"set_account_{i}"),
+            InlineKeyboardButton(text="Delete", callback_data=f"delete_account_{i}"),
+            InlineKeyboardButton(text="On" if token.get("active", True) else "Off", callback_data=f"toggle_account_{i}"),
+            InlineKeyboardButton(text="View", callback_data=f"view_account_{i}"),
+        ]
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 @router.message(Command("password"))
 async def password_command(message: types.Message):
     user_id = message.chat.id
@@ -348,30 +369,9 @@ async def callback_handler(callback_query: CallbackQuery):
         if not tokens:
             await callback_query.message.edit_text("No accounts saved. Send a new token to add an account.", reply_markup=back_markup)
             return
-        buttons = []
-        for i, token in enumerate(tokens):
-            is_current = (token['token'] == current_token)
-            row = [
-                InlineKeyboardButton(
-                    text=f"{token['name']} {'(Current)' if is_current else ''}",
-                    callback_data=f"set_account_{i}"
-                ),
-                InlineKeyboardButton(
-                    text="Delete", callback_data=f"delete_account_{i}"
-                ),
-                InlineKeyboardButton(
-                    text="On" if token.get("active", True) else "Off",
-                    callback_data=f"toggle_account_{i}"
-                ),
-                InlineKeyboardButton(
-                    text="View", callback_data=f"view_account_{i}"
-                ),
-            ]
-            buttons.append(row)
-        buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
         await callback_query.message.edit_text(
             "Manage your accounts:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            reply_markup=build_accounts_buttons(tokens, current_token)
         )
     elif callback_query.data.startswith("set_account_"):
         index = int(callback_query.data.split("_")[-1])
@@ -381,33 +381,11 @@ async def callback_handler(callback_query: CallbackQuery):
                 await callback_query.answer("This account is turned off. Turn it on to activate.")
                 return
             set_current_account(user_id, tokens[index]["token"])
-            # Refresh the accounts menu with updated (Current) status and stay on the menu
             tokens = get_all_tokens(user_id)
             current_token = get_current_account(user_id)
-            buttons = []
-            for i, token in enumerate(tokens):
-                is_current = (token['token'] == current_token)
-                row = [
-                    InlineKeyboardButton(
-                        text=f"{token['name']} {'(Current)' if is_current else ''}",
-                        callback_data=f"set_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="Delete", callback_data=f"delete_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="On" if token.get("active", True) else "Off",
-                        callback_data=f"toggle_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="View", callback_data=f"view_account_{i}"
-                    ),
-                ]
-                buttons.append(row)
-            buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
             await callback_query.message.edit_text(
                 "Manage your accounts:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                reply_markup=build_accounts_buttons(tokens, current_token)
             )
         else:
             await callback_query.answer("Invalid account selected.")
@@ -427,30 +405,9 @@ async def callback_handler(callback_query: CallbackQuery):
             set_account_active(user_id, tokens[index]["token"], not current_status)
             tokens = get_all_tokens(user_id)
             current_token = get_current_account(user_id)
-            buttons = []
-            for i, token in enumerate(tokens):
-                is_current = (token['token'] == current_token)
-                row = [
-                    InlineKeyboardButton(
-                        text=f"{token['name']} {'(Current)' if is_current else ''}",
-                        callback_data=f"set_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="Delete", callback_data=f"delete_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="On" if token.get("active", True) else "Off",
-                        callback_data=f"toggle_account_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        text="View", callback_data=f"view_account_{i}"
-                    ),
-                ]
-                buttons.append(row)
-            buttons.append([InlineKeyboardButton(text="Back", callback_data="back_to_menu")])
             await callback_query.message.edit_text(
                 "Manage your accounts:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                reply_markup=build_accounts_buttons(tokens, current_token)
             )
         else:
             await callback_query.answer("Invalid account selected.")
