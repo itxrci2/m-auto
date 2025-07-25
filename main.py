@@ -28,7 +28,7 @@ from requests import (
 )
 from blocklist import (
     blocklist_command, handle_blocklist_callback,
-    is_blocklist_active, add_to_blocklist, get_user_blocklist
+    is_blocklist_active, add_to_permanent_blocklist, add_to_temporary_blocklist, get_user_blocklist
 )
 from signup import signup_command, signup_callback_handler, signup_message_handler
 
@@ -227,16 +227,16 @@ async def blockadd_command(message: types.Message):
     user_id = message.chat.id
     args = message.text.strip().split()
     if len(args) < 2:
-        await message.reply("Usage: /blockadd <user_id>")
+        await message.reply("Usage: /block <user_id>")
         return
     block_id = args[1]
     blocklist = get_user_blocklist(user_id)
     if block_id in blocklist:
         await message.reply(f"User ID {block_id} is already in your blocklist.")
         return
-    add_to_blocklist(user_id, block_id)
-    await message.reply(f"User ID {block_id} has been added to your blocklist.")
-
+    add_to_permanent_blocklist(user_id, block_id)
+    await message.reply(f"User ID {block_id} has been permanently blocked.")
+    
 @router.message(Command("aio"))
 async def aio_command(message: types.Message):
     if not has_valid_access(message.chat.id):
