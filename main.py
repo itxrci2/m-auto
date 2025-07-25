@@ -28,7 +28,7 @@ from requests import (
 )
 from blocklist import (
     blocklist_command, handle_blocklist_callback,
-    is_blocklist_active, add_to_permanent_blocklist, add_to_temporary_blocklist, get_user_blocklist
+    is_blocklist_active, add_to_permanent_blocklist, get_user_blocklist
 )
 from signup import signup_command, signup_callback_handler, signup_message_handler
 
