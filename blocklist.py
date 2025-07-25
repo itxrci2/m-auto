@@ -14,25 +14,55 @@ def get_blocklist_doc(user_id):
     return db.blocklists.find_one({"user_id": user_id})
 
 def get_user_blocklist(user_id):
+    """Return union of permanent and temporary blocklists."""
     doc = get_blocklist_doc(user_id)
-    if doc and "ids" in doc:
-        return set(doc["ids"])
-    return set()
+    permanent = set(doc.get("permanent", [])) if doc else set()
+    temporary = set(doc.get("temporary", [])) if doc else set()
+    return permanent | temporary
 
-def set_user_blocklist(user_id, ids):
+def get_permanent_blocklist(user_id):
+    doc = get_blocklist_doc(user_id)
+    return set(doc.get("permanent", [])) if doc else set()
+
+def get_temporary_blocklist(user_id):
+    doc = get_blocklist_doc(user_id)
+    return set(doc.get("temporary", [])) if doc else set()
+
+def set_user_blocklist(user_id, permanent, temporary):
     db.blocklists.update_one(
         {"user_id": user_id},
-        {"$set": {"ids": list(ids)}},
+        {"$set": {
+            "permanent": list(permanent),
+            "temporary": list(temporary)
+        }},
         upsert=True
     )
 
-def add_to_blocklist(user_id, user_to_block):
-    ids = get_user_blocklist(user_id)
-    ids.add(user_to_block)
-    set_user_blocklist(user_id, ids)
+def add_to_permanent_blocklist(user_id, user_to_block):
+    doc = get_blocklist_doc(user_id)
+    permanent = set(doc.get("permanent", [])) if doc else set()
+    if user_to_block not in permanent:
+        permanent.add(user_to_block)
+        db.blocklists.update_one(
+            {"user_id": user_id},
+            {"$set": {"permanent": list(permanent)}},
+            upsert=True
+        )
 
-def clear_blocklist(user_id):
-    db.blocklists.update_one({"user_id": user_id}, {"$set": {"ids": []}}, upsert=True)
+def add_to_temporary_blocklist(user_id, user_to_block):
+    doc = get_blocklist_doc(user_id)
+    temporary = set(doc.get("temporary", [])) if doc else set()
+    permanent = set(doc.get("permanent", [])) if doc else set()
+    if user_to_block not in permanent and user_to_block not in temporary:
+        temporary.add(user_to_block)
+        db.blocklists.update_one(
+            {"user_id": user_id},
+            {"$set": {"temporary": list(temporary)}},
+            upsert=True
+        )
+
+def clear_temporary_blocklist(user_id):
+    db.blocklists.update_one({"user_id": user_id}, {"$set": {"temporary": []}}, upsert=True)
 
 def is_blocklist_active(user_id):
     doc = get_blocklist_doc(user_id)
@@ -46,20 +76,20 @@ def set_blocklist_active(user_id, active: bool):
     )
 
 async def blocklist_command(message_or_callback, edit=True):
-    # Always edit the message for settings, to avoid sending a new message
     if isinstance(message_or_callback, types.CallbackQuery):
         user_id = message_or_callback.from_user.id
     else:
         user_id = message_or_callback.chat.id
     status = "ON" if is_blocklist_active(user_id) else "OFF"
-    count = len(get_user_blocklist(user_id))
+    permanent = get_permanent_blocklist(user_id)
+    temporary = get_temporary_blocklist(user_id)
     text = (
         f"Blocklist status: <b>{status}</b>\n"
-        f"Blocked users: <b>{count}</b>\n\n"
-        f"Use the buttons to turn blocklist ON/OFF or CLEAR the blocklist."
+        f"Permanent blocks: <b>{len(permanent)}</b>\n"
+        f"Temporary blocks: <b>{len(temporary)}</b>\n\n"
+        f"Use the buttons to turn blocklist ON/OFF or CLEAR the temporary blocklist."
     )
     if isinstance(message_or_callback, types.CallbackQuery) or edit:
-        # Edit message if from callback, or if explicitly requested via edit param
         if isinstance(message_or_callback, types.CallbackQuery):
             await message_or_callback.message.edit_text(text, reply_markup=BLOCKLIST_MARKUP, parse_mode="HTML")
             await message_or_callback.answer()
@@ -82,17 +112,19 @@ async def handle_blocklist_callback(callback_query):
         await callback_query.answer("Blocklist is now OFF.")
         updated = True
     elif data == "blocklist_clear":
-        clear_blocklist(user_id)
-        await callback_query.answer("Blocklist cleared!")
+        clear_temporary_blocklist(user_id)
+        await callback_query.answer("Temporary blocklist cleared!")
         updated = True
 
     if updated:
         status = "ON" if is_blocklist_active(user_id) else "OFF"
-        count = len(get_user_blocklist(user_id))
+        permanent = get_permanent_blocklist(user_id)
+        temporary = get_temporary_blocklist(user_id)
         text = (
             f"Blocklist status: <b>{status}</b>\n"
-            f"Blocked users: <b>{count}</b>\n\n"
-            f"Use the buttons to turn blocklist ON/OFF or CLEAR the blocklist."
+            f"Permanent blocks: <b>{len(permanent)}</b>\n"
+            f"Temporary blocks: <b>{len(temporary)}</b>\n\n"
+            f"Use the buttons to turn blocklist ON/OFF or CLEAR the temporary blocklist."
         )
         await callback_query.message.edit_text(text, reply_markup=BLOCKLIST_MARKUP, parse_mode="HTML")
         return True
