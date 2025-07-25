@@ -4,7 +4,7 @@ import html
 import logging
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
-from blocklist import is_blocklist_active, add_to_blocklist, get_user_blocklist
+from blocklist import is_blocklist_active, add_to_temporary_blocklist, get_user_blocklist
 from dateutil import parser
 from datetime import datetime, timezone
 
@@ -185,6 +185,12 @@ async def run_all_countries_token(user_id, state, bot, token, account_name):
             for user in users:
                 if country_requests >= REQUESTS_PER_COUNTRY or not state.get("running"):
                     break
+                if is_blocklist_active(user_id):
+                    blocklist = get_user_blocklist(user_id)
+                    if user["_id"] in blocklist:
+                        continue
+                    add_to_temporary_blocklist(user_id, user["_id"])
+
                 if not await like_user(session, headers, user["_id"]):
                     like_limit_exceeded = True
                     break
