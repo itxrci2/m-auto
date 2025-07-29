@@ -1,8 +1,9 @@
 import aiohttp
 import json
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from db import set_token, get_tokens, set_info_card, get_info_card  # <-- import info card functions!
+from db import set_token, get_tokens, set_info_card, get_info_card
 from requests import format_user
+from device_info import random_device_info
 
 def format_user_with_nationality(user):
     def time_ago(dt_str):
@@ -317,6 +318,7 @@ async def meeff_upload_image(img_bytes):
         return None
 
 async def try_signup(state):
+    device_info = random_device_info()
     if state.get("photos"):
         photos_str = "|".join(state["photos"])
     else:
@@ -325,18 +327,7 @@ async def try_signup(state):
     payload = {
         "providerId": state["email"],
         "providerToken": state["password"],
-        "os": "iOS 17.5.1",
-        "platform": "ios",
-        "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
-        "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
-        "deviceUniqueId": "56cb9030870fa44a",
-        "deviceLanguage": "en",
-        "deviceRegion": "US",
-        "simRegion": "US",
-        "deviceGmtOffset": "-0700",
-        "deviceRooted": 0,
-        "deviceEmulator": 0,
-        "appVersion": "6.5.5",
+        **device_info,
         "name": state["name"],
         "gender": state["gender"],
         "color": "777777",
@@ -364,23 +355,13 @@ async def try_signup(state):
             return await resp.json()
 
 async def try_signin(email, password):
+    device_info = random_device_info()
     url = "https://api.meeff.com/user/login/v4"
     payload = {
         "provider": "email",
         "providerId": email,
         "providerToken": password,
-        "os": "iOS 17.5.1",
-        "platform": "ios",
-        "device": "BRAND: Apple, MODEL: iPhone15,3, DEVICE: iPhone 15 Pro Max, PRODUCT: iPhone15ProMax, DISPLAY: Super Retina XDR OLED",
-        "pushToken": "cM_FLbrFTvSGxIbV6IBusT:APA91bFakeTokenForPushNotification1234567890",
-        "deviceUniqueId": "56cb9030870fa44a",
-        "deviceLanguage": "en",
-        "deviceRegion": "US",
-        "simRegion": "US",
-        "deviceGmtOffset": "-0700",
-        "deviceRooted": 0,
-        "deviceEmulator": 0,
-        "appVersion": "6.5.5",
+        **device_info,
         "locale": "en"
     }
     headers = {
@@ -401,7 +382,6 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
         user_id = msg_obj.chat.id
         tokens = get_tokens(user_id)
         account_name = user_data.get("name") if user_data else creds.get("email")
-        # Overwrite token/info_card for the same email
         set_token(user_id, access_token, account_name, email)
         if user_data:
             user_data["email"] = creds.get("email")
