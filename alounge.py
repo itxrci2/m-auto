@@ -14,6 +14,25 @@ def get_alounge_markup():
         ]
     )
 
+def get_alounge_choice_markup():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Current", callback_data="alounge_current"),
+                InlineKeyboardButton(text="All", callback_data="alounge_all")
+            ],
+            [InlineKeyboardButton(text="Cancel", callback_data="alounge_cancel")]
+        ]
+    )
+
+def get_alounge_confirm_markup():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Confirm", callback_data="alounge_confirm")],
+            [InlineKeyboardButton(text="Cancel", callback_data="alounge_cancel")]
+        ]
+    )
+
 async def send_lounge_once(token, messages, bot, chat_id, status_message):
     users = await fetch_lounge_users(token)
     sent_count = 0
@@ -33,7 +52,7 @@ async def send_lounge_once(token, messages, bot, chat_id, status_message):
         )
     return sent_count
 
-async def alounge_command_handler(message, has_valid_access, get_current_account, user_states, bot):
+async def alounge_command_handler(message, has_valid_access, get_current_account, user_states, bot, get_tokens=None):
     user_id = message.chat.id
     state = user_states[user_id]
     if not has_valid_access(user_id):
@@ -52,25 +71,14 @@ async def alounge_command_handler(message, has_valid_access, get_current_account
         await message.reply("Auto-lounge is already running. Use the Stop button on the pinned message to stop it.")
         return
 
+    state['pending_alounge_message'] = messages
     msg_lines = "\n".join(f"<b>Message:</b> {html.escape(m)}" for m in messages)
-    status_msg = await message.reply(
-        f"Auto-Lounge started!\n\n{msg_lines}\n\nMessages will be sent every 30 seconds.",
-        reply_markup=get_alounge_markup(),
+    markup = get_alounge_choice_markup()
+    await message.reply(
+        f"How would you like to send your auto lounge message?\n\n{msg_lines}",
+        reply_markup=markup,
         parse_mode="HTML"
     )
-    # Pin the message for easy access
-    try:
-        await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id, disable_notification=True)
-        state["pinned_message_id"] = status_msg.message_id
-    except Exception as e:
-        logging.warning(f"Failed to pin message: {e}")
-
-    # Start background task
-    task = asyncio.create_task(
-        alounge_loop(token, messages, bot, user_id, status_msg, state)
-    )
-    AUTOLOUNGE_TASKS[user_id] = (task, status_msg.message_id)
-    state["alounge_running"] = True
 
 async def alounge_loop(token, messages, bot, chat_id, status_message, state):
     try:
@@ -78,7 +86,6 @@ async def alounge_loop(token, messages, bot, chat_id, status_message, state):
             await send_lounge_once(token, messages, bot, chat_id, status_message)
             await asyncio.sleep(30)
     except asyncio.CancelledError:
-        # Clean up and unpin message
         try:
             await bot.unpin_chat_message(chat_id=chat_id, message_id=status_message.message_id)
         except Exception:
@@ -86,25 +93,140 @@ async def alounge_loop(token, messages, bot, chat_id, status_message, state):
         state["alounge_running"] = False
         return
 
-async def handle_alounge_callback(callback_query, user_states, bot, get_current_account):
+async def alounge_all_loop(tokens, messages, bot, chat_id, status_message, state):
+    try:
+        while True:
+            results = []
+            for idx, token_info in enumerate(tokens):
+                await status_message.edit_text(
+                    f"<b>Account:</b> {html.escape(token_info.get('name', f'Account {idx+1}'))}\nAuto-lounge sending...",
+                    parse_mode="HTML",
+                    reply_markup=get_alounge_markup()
+                )
+                sent_count = await send_lounge_once(token_info["token"], messages, bot, chat_id, status_message)
+                results.append(sent_count)
+            summary_text = (
+                f"Total Accounts: {len(tokens)}\n"
+                f"Auto-lounge sent messages this round: ({' | '.join(str(x) for x in results)})"
+            )
+            await status_message.edit_text(summary_text, parse_mode="HTML", reply_markup=get_alounge_markup())
+            await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=status_message.message_id)
+        except Exception:
+            pass
+        state["alounge_running"] = False
+        return
+
+async def handle_alounge_callback(callback_query, user_states, bot, get_current_account, get_tokens=None):
     user_id = callback_query.from_user.id
     state = user_states[user_id]
-    if callback_query.data == "alounge_stop":
-        # Cancel the task if running
-        task_info = AUTOLOUNGE_TASKS.pop(user_id, None)
-        if task_info:
-            task, pinned_msg_id = task_info
-            task.cancel()
-            await callback_query.message.edit_text("Auto-Lounge stopped. ✅")
+    data = callback_query.data
+
+    # --- Choice: Current
+    if data == "alounge_current":
+        token = get_current_account(user_id)
+        if not token:
+            await callback_query.answer("No current account found.")
+            return True
+        messages = state.get('pending_alounge_message', [])
+        msg_lines = "\n".join(f"<b>Message:</b> {html.escape(m)}" for m in messages)
+        status_msg = await callback_query.message.edit_text(
+            f"Auto-lounge started for the current account!\n{msg_lines}\n\nMessages will be sent every 30 seconds.",
+            reply_markup=get_alounge_markup(),
+            parse_mode="HTML"
+        )
+        try:
+            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id, disable_notification=True)
+            state["pinned_message_id"] = status_msg.message_id
+        except Exception as e:
+            logging.warning(f"Failed to pin message: {e}")
+        task = asyncio.create_task(
+            alounge_loop(token, messages, bot, user_id, status_msg, state)
+        )
+        AUTOLOUNGE_TASKS[user_id] = [task]
+        state["alounge_running"] = True
+        state.pop('pending_alounge_message', None)
+        await callback_query.answer("Auto-lounge started.")
+        return True
+
+    # --- Choice: All accounts
+    elif data == "alounge_all":
+        if get_tokens is None:
+            await callback_query.answer("Account selection not available.")
+            return True
+        tokens = get_tokens(user_id)
+        if not tokens:
+            await callback_query.message.edit_text("No accounts found.")
+            return True
+        acc_line = "<b>Accounts:</b> " + ", ".join(html.escape(t["name"]) for t in tokens)
+        confirm_markup = get_alounge_confirm_markup()
+        await callback_query.message.edit_text(
+            f"You chose to send the auto lounge message to:\n{acc_line}\n\nPress Confirm to proceed.",
+            reply_markup=confirm_markup,
+            parse_mode="HTML"
+        )
+        state['alounge_send_type'] = "alounge_all"
+        await callback_query.answer()
+        return True
+
+    # --- Confirm All
+    elif data == "alounge_confirm":
+        if get_tokens is None:
+            await callback_query.answer("Account selection not available.")
+            return True
+        tokens = get_tokens(user_id)
+        if not tokens:
+            await callback_query.message.edit_text("No accounts found.")
+            return True
+        messages = state.get('pending_alounge_message', [])
+        status_msg = await callback_query.message.edit_text(
+            "Auto-lounge started for all accounts! Messages will be sent every 30 seconds.",
+            reply_markup=get_alounge_markup()
+        )
+        try:
+            await bot.pin_chat_message(chat_id=user_id, message_id=status_msg.message_id, disable_notification=True)
+            state["pinned_message_id"] = status_msg.message_id
+        except Exception as e:
+            logging.warning(f"Failed to pin message: {e}")
+        task = asyncio.create_task(
+            alounge_all_loop(tokens, messages, bot, user_id, status_msg, state)
+        )
+        AUTOLOUNGE_TASKS[user_id] = [task]
+        state["alounge_running"] = True
+        state.pop('pending_alounge_message', None)
+        state.pop('alounge_send_type', None)
+        await callback_query.answer("Auto-lounge started for all accounts.")
+        return True
+
+    # --- Cancel
+    elif data == "alounge_cancel":
+        state.pop('alounge_send_type', None)
+        state.pop('pending_alounge_message', None)
+        await callback_query.message.edit_text("Auto-lounge sending cancelled.")
+        await callback_query.answer("Cancelled.")
+        return True
+
+    # --- Stop
+    elif data == "alounge_stop":
+        # Cancel the task(s) if running
+        task_list = AUTOLOUNGE_TASKS.pop(user_id, None)
+        if task_list:
+            for task in task_list:
+                task.cancel()
             try:
-                await bot.unpin_chat_message(chat_id=user_id, message_id=pinned_msg_id)
+                if state.get("pinned_message_id"):
+                    await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
             except Exception:
                 pass
             state["alounge_running"] = False
             state["pinned_message_id"] = None
+            await callback_query.message.edit_text("Auto-lounge stopped. ✅")
             await callback_query.answer("Stopped.")
             return True
         else:
             await callback_query.answer("No auto-lounge running.")
             return True
+
     return False
