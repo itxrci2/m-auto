@@ -32,6 +32,10 @@ from blocklist import (
 )
 from signup import signup_command, signup_callback_handler, signup_message_handler
 
+# --- ALounge integration ---
+from alounge import alounge_command_handler, handle_alounge_callback
+# ---------------------------
+
 API_TOKEN = "7735279075:AAH_GbPyx4oSh1_1Qn3GYvxNNRr2DEydBgI"
 ADMIN_USER_IDS = [6387028671, 7725409374, 6816341239, 6204011131]
 TEMP_PASSWORD = "11223344"
@@ -154,6 +158,14 @@ async def lounge_command(message: types.Message):
     await lounge_command_handler(
         message, has_valid_access, get_current_account, user_states
     )
+
+# -- ALounge command handler --
+@router.message(Command("alounge"))
+async def alounge_command(message: types.Message):
+    await alounge_command_handler(
+        message, has_valid_access, get_current_account, user_states, bot
+    )
+# ----------------------------
 
 @router.message(Command("invoke"))
 async def invoke_command(message: types.Message):
@@ -347,6 +359,8 @@ async def callback_handler(callback_query: CallbackQuery):
     if await handle_chatroom_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_message_to_everyone): return
     # Lounge
     if await handle_lounge_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_lounge): return
+    # Auto-Lounge
+    if await handle_alounge_callback(callback_query, user_states, bot, get_current_account): return
     # AIO
     if callback_query.data.startswith("aio_"):
         await aio_callback_handler(callback_query)
@@ -440,6 +454,7 @@ async def set_bot_commands():
     commands = [
         BotCommand(command="start", description="Start the bot"),
         BotCommand(command="lounge", description="Send message to everyone in the lounge"),
+        BotCommand(command="alounge", description="Auto-send lounge message every 30 seconds"),
         BotCommand(command="chatroom", description="Send a message to everyone in all chatrooms"),
         BotCommand(command="add", description="Manually add a person by ID"),
         BotCommand(command="block", description="Manually block a user ID"),
