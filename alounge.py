@@ -43,13 +43,6 @@ async def send_lounge_once(token, messages, bot, chat_id, status_message):
             for message in messages:
                 await send_message(token, chatroom_id, message.strip())
             sent_count += 1
-    if bot and chat_id and status_message:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_message.message_id,
-            text=f"[Auto] Messages sent to {sent_count} users in lounge.",
-            reply_markup=get_alounge_markup()
-        )
     return sent_count
 
 async def alounge_command_handler(message, has_valid_access, get_current_account, user_states, bot, get_tokens=None):
@@ -81,9 +74,17 @@ async def alounge_command_handler(message, has_valid_access, get_current_account
     )
 
 async def alounge_loop(token, messages, bot, chat_id, status_message, state):
+    total_sent = 0
     try:
         while True:
-            await send_lounge_once(token, messages, bot, chat_id, status_message)
+            sent_this_round = await send_lounge_once(token, messages, bot, chat_id, status_message)
+            total_sent += sent_this_round
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_message.message_id,
+                text=f"[Auto] Messages sent to {sent_this_round} users in lounge (this round).\nTotal messages sent since started: {total_sent}",
+                reply_markup=get_alounge_markup()
+            )
             await asyncio.sleep(30)
     except asyncio.CancelledError:
         try:
@@ -94,22 +95,26 @@ async def alounge_loop(token, messages, bot, chat_id, status_message, state):
         return
 
 async def alounge_all_loop(tokens, messages, bot, chat_id, status_message, state):
+    account_totals = [0 for _ in tokens]
     try:
         while True:
             results = []
             for idx, token_info in enumerate(tokens):
-                await status_message.edit_text(
-                    f"<b>Account:</b> {html.escape(token_info.get('name', f'Account {idx+1}'))}\nAuto-lounge sending...",
-                    parse_mode="HTML",
-                    reply_markup=get_alounge_markup()
-                )
                 sent_count = await send_lounge_once(token_info["token"], messages, bot, chat_id, status_message)
+                account_totals[idx] += sent_count
                 results.append(sent_count)
             summary_text = (
                 f"Total Accounts: {len(tokens)}\n"
-                f"Auto-lounge sent messages this round: ({' | '.join(str(x) for x in results)})"
+                f"Auto-lounge sent messages this round: ({' | '.join(str(x) for x in results)})\n"
+                f"Total messages sent since started: ({' | '.join(str(x) for x in account_totals)})"
             )
-            await status_message.edit_text(summary_text, parse_mode="HTML", reply_markup=get_alounge_markup())
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_message.message_id,
+                text=summary_text,
+                parse_mode="HTML",
+                reply_markup=get_alounge_markup()
+            )
             await asyncio.sleep(30)
     except asyncio.CancelledError:
         try:
