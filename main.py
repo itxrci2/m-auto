@@ -163,7 +163,7 @@ async def lounge_command(message: types.Message):
 @router.message(Command("alounge"))
 async def alounge_command(message: types.Message):
     await alounge_command_handler(
-        message, has_valid_access, get_current_account, user_states, bot
+        message, has_valid_access, get_current_account, user_states, bot, get_tokens
     )
 # ----------------------------
 
@@ -359,8 +359,8 @@ async def callback_handler(callback_query: CallbackQuery):
     if await handle_chatroom_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_message_to_everyone): return
     # Lounge
     if await handle_lounge_callback(callback_query, state, bot, user_id, get_current_account, get_tokens, send_lounge): return
-    # Auto-Lounge
-    if await handle_alounge_callback(callback_query, user_states, bot, get_current_account): return
+    # Auto-Lounge (pass get_tokens!)
+    if await handle_alounge_callback(callback_query, user_states, bot, get_current_account, get_tokens): return
     # AIO
     if callback_query.data.startswith("aio_"):
         await aio_callback_handler(callback_query)
