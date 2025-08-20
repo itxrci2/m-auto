@@ -78,7 +78,7 @@ def set_blocklist_active(user_id, active: bool):
 def atomic_check_and_add_blocklist(user_id, user_to_block):
     """
     Atomically check if user_to_block is already blocked, and add to temporary blocklist if not.
-    Returns True if newly added (should proceed with like), False if already present (should skip).
+    Returns True if you are the first (should send like), False if already present (should skip).
     """
     res = db.blocklists.update_one(
         {
@@ -89,7 +89,6 @@ def atomic_check_and_add_blocklist(user_id, user_to_block):
         {"$addToSet": {"temporary": user_to_block}},
         upsert=True
     )
-    # If modified_count == 1, user was newly added
     return res.modified_count == 1
 
 async def blocklist_command(message_or_callback, edit=True):
