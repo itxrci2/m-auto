@@ -165,7 +165,7 @@ async def update_current_filter(user_id, token):
                 resp_text = await response.text()
                 logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
 
-async def is_blocked_atomic(user_id, user_id_to_check):
+async def is_first_to_like(user_id, user_id_to_check):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, atomic_check_and_add_blocklist, user_id, user_id_to_check
@@ -205,8 +205,8 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                     if not acc["running"] or not state.get("running", True): break
                     # --- atomic MongoDB blocklist fix ---
                     if is_blocklist_active(user_id):
-                        added_now = await is_blocked_atomic(user_id, user['_id'])
-                        if not added_now:
+                        is_first = await is_first_to_like(user_id, user['_id'])
+                        if not is_first:
                             acc["skipped"] += 1
                             await update()
                             continue
@@ -285,8 +285,8 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                 if not state.get("running", True): break
                 # --- atomic MongoDB blocklist fix ---
                 if is_blocklist_active(user_id):
-                    added_now = await is_blocked_atomic(user_id, user['_id'])
-                    if not added_now:
+                    is_first = await is_first_to_like(user_id, user['_id'])
+                    if not is_first:
                         state["skipped_count"] += 1
                         await update()
                         continue
