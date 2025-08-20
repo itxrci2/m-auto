@@ -1,6 +1,7 @@
 from db import db
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
 
 BLOCKLIST_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
     [
@@ -9,6 +10,8 @@ BLOCKLIST_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="Clear", callback_data="blocklist_clear"),
     ]
 ])
+
+blocklist_lock = asyncio.Lock()
 
 def get_blocklist_doc(user_id):
     return db.blocklists.find_one({"user_id": user_id})
@@ -60,6 +63,15 @@ def add_to_temporary_blocklist(user_id, user_to_block):
             {"$set": {"temporary": list(temporary)}},
             upsert=True
         )
+
+async def atomic_check_and_add_blocklist(user_id, user_to_block):
+    """Atomically check the blocklist and add if not already present (prevents race condition)."""
+    async with blocklist_lock:
+        blocklist = get_user_blocklist(user_id)
+        if user_to_block in blocklist:
+            return True
+        add_to_temporary_blocklist(user_id, user_to_block)
+        return False
 
 def clear_temporary_blocklist(user_id):
     db.blocklists.update_one({"user_id": user_id}, {"$set": {"temporary": []}}, upsert=True)
