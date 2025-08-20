@@ -75,25 +75,22 @@ def set_blocklist_active(user_id, active: bool):
         upsert=True
     )
 
-# Fast atomic MongoDB blocklist check/add (no lock needed)
 def atomic_check_and_add_blocklist(user_id, user_to_block):
     """
     Atomically check if user_to_block is already blocked, and add to temporary blocklist if not.
-    Returns True if already blocked, False if newly added.
+    Returns True if newly added (should proceed with like), False if already present (should skip).
     """
     res = db.blocklists.update_one(
         {
             "user_id": user_id,
-            "$nor": [
-                {"permanent": user_to_block},
-                {"temporary": user_to_block}
-            ]
+            "temporary": {"$ne": user_to_block},
+            "permanent": {"$ne": user_to_block}
         },
         {"$addToSet": {"temporary": user_to_block}},
         upsert=True
     )
-    # If no doc was modified, user was already blocked
-    return res.modified_count == 0
+    # If modified_count == 1, user was newly added
+    return res.modified_count == 1
 
 async def blocklist_command(message_or_callback, edit=True):
     if isinstance(message_or_callback, types.CallbackQuery):
