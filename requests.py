@@ -165,6 +165,13 @@ async def update_current_filter(user_id, token):
                 resp_text = await response.text()
                 logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
 
+async def is_blocked_atomic(user_id, user_id_to_check):
+    # run MongoDB atomic operation in thread pool if async
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, atomic_check_and_add_blocklist, user_id, user_id_to_check
+    )
+
 async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
     start_time = datetime.now()
     accounts = [{"added":0, "skipped":0, "exceeded":False, "running":True} for _ in tokens]
@@ -197,9 +204,9 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                     break
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
-                    # --- atomic blocklist fix ---
+                    # --- atomic MongoDB blocklist fix ---
                     if is_blocklist_active(user_id):
-                        already_blocked = await atomic_check_and_add_blocklist(user_id, user['_id'])
+                        already_blocked = await is_blocked_atomic(user_id, user['_id'])
                         if already_blocked:
                             acc["skipped"] += 1
                             await update()
@@ -277,9 +284,9 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                 break
             for user in users:
                 if not state.get("running", True): break
-                # --- atomic blocklist fix ---
+                # --- atomic MongoDB blocklist fix ---
                 if is_blocklist_active(user_id):
-                    already_blocked = await atomic_check_and_add_blocklist(user_id, user['_id'])
+                    already_blocked = await is_blocked_atomic(user_id, user['_id'])
                     if already_blocked:
                         state["skipped_count"] += 1
                         await update()
