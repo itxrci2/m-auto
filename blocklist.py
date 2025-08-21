@@ -1,6 +1,7 @@
 from db import db
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
 
 BLOCKLIST_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
     [
@@ -9,6 +10,8 @@ BLOCKLIST_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="Clear", callback_data="blocklist_clear"),
     ]
 ])
+
+blocklist_lock = asyncio.Lock()
 
 def get_blocklist_doc(user_id):
     return db.blocklists.find_one({"user_id": user_id})
@@ -61,6 +64,15 @@ def add_to_temporary_blocklist(user_id, user_to_block):
             upsert=True
         )
 
+async def atomic_check_and_add_blocklist(user_id, user_to_block):
+    """Atomically check the blocklist and add if not already present (prevents race condition)."""
+    async with blocklist_lock:
+        blocklist = get_user_blocklist(user_id)
+        if user_to_block in blocklist:
+            return True
+        add_to_temporary_blocklist(user_id, user_to_block)
+        return False
+
 def clear_temporary_blocklist(user_id):
     db.blocklists.update_one({"user_id": user_id}, {"$set": {"temporary": []}}, upsert=True)
 
@@ -74,22 +86,6 @@ def set_blocklist_active(user_id, active: bool):
         {"$set": {"active": active}},
         upsert=True
     )
-
-def atomic_check_and_add_blocklist(user_id, user_to_block):
-    """
-    Atomically check if user_to_block is already blocked, and add to temporary blocklist if not.
-    Returns True if you are the first (should send like), False if already present (should skip).
-    """
-    res = db.blocklists.update_one(
-        {
-            "user_id": user_id,
-            "temporary": {"$ne": user_to_block},
-            "permanent": {"$ne": user_to_block}
-        },
-        {"$addToSet": {"temporary": user_to_block}},
-        upsert=True
-    )
-    return res.modified_count == 1
 
 async def blocklist_command(message_or_callback, edit=True):
     if isinstance(message_or_callback, types.CallbackQuery):
