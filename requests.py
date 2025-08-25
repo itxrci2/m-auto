@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from blocklist import is_blocklist_active, get_permanent_blocklist, get_temporary_blocklist
 from dateutil import parser
 from datetime import datetime
-from db import get_user_filters
+from db import get_user_filters, db
 
 # --- UI MARKUPS ---
 
@@ -165,20 +165,44 @@ async def update_current_filter(user_id, token):
                 resp_text = await response.text()
                 logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
 
-# ----------- BATCH BLOCKLIST HELPERS ---------
-async def update_temporary_blocklist(user_id, original, new_blocks):
-    """Batch update the temporary blocklist in DB."""
-    if not new_blocks:
-        return original
-    from db import db
-    merged = original | new_blocks
-    db.blocklists.update_one(
-        {"user_id": user_id},
-        {"$set": {"temporary": list(merged)}},
-        upsert=True
-    )
-    return merged
-# ---------------------------------------------
+# ----------- ATOMIC SHARED MEMORY FOR BLOCKLIST ---------
+_blocklist_locks = {}
+_blocklist_shared_temp = {}
+
+def get_blocklist_lock(user_id):
+    if user_id not in _blocklist_locks:
+        _blocklist_locks[user_id] = asyncio.Lock()
+    return _blocklist_locks[user_id]
+
+def get_shared_temp(user_id):
+    if user_id not in _blocklist_shared_temp:
+        _blocklist_shared_temp[user_id] = set()
+    return _blocklist_shared_temp[user_id]
+
+async def atomic_batch_check_and_add(user_id, user_to_block, permanent, temporary):
+    lock = get_blocklist_lock(user_id)
+    shared_temp = get_shared_temp(user_id)
+    async with lock:
+        if (user_to_block in permanent or
+            user_to_block in temporary or
+            user_to_block in shared_temp):
+            return True
+        shared_temp.add(user_to_block)
+        return False
+
+async def flush_shared_temp_to_db(user_id, original_temporary):
+    shared_temp = get_shared_temp(user_id)
+    if shared_temp:
+        merged = original_temporary | shared_temp
+        db.blocklists.update_one(
+            {"user_id": user_id},
+            {"$set": {"temporary": list(merged)}},
+            upsert=True
+        )
+        shared_temp.clear()
+        return merged
+    return original_temporary
+# --------------------------------------------------------
 
 async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
     start_time = datetime.now()
@@ -190,6 +214,9 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
     last_update_time = 0
     UPDATE_INTERVAL = 2
     BLOCK_BATCH_SIZE = 20
+
+    permanent = get_permanent_blocklist(user_id)
+    temporary = get_temporary_blocklist(user_id)
 
     async def update(force=False):
         nonlocal last_text, last_update_time
@@ -205,9 +232,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
     async def worker(i, token):
         acc = accounts[i]
         sent_since_last_filter_update = 0
-        permanent = get_permanent_blocklist(user_id)
-        temporary = get_temporary_blocklist(user_id)
-        session_temp = set()
+        batch_counter = 0
         async with aiohttp.ClientSession() as session:
             while acc["running"] and state.get("running", True):
                 users = await fetch_users(session, token["token"])
@@ -216,25 +241,24 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                     break
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
-                    # --- batch blocklist check ---
+                    # --- atomic batch blocklist check ---
                     if is_blocklist_active(user_id):
-                        if (user['_id'] in permanent or
-                            user['_id'] in temporary or
-                            user['_id'] in session_temp):
+                        already_blocked = await atomic_batch_check_and_add(user_id, user['_id'], permanent, temporary)
+                        if already_blocked:
                             acc["skipped"] += 1
                             await update()
                             continue
-                        session_temp.add(user['_id'])
-                        if len(session_temp) >= BLOCK_BATCH_SIZE:
-                            temporary = await update_temporary_blocklist(user_id, temporary, session_temp)
-                            session_temp.clear()
+                        batch_counter += 1
+                        if batch_counter >= BLOCK_BATCH_SIZE:
+                            temporary = await flush_shared_temp_to_db(user_id, temporary)
+                            batch_counter = 0
                     else:
-                        blocklist = permanent | temporary | session_temp
+                        blocklist = permanent | temporary | get_shared_temp(user_id)
                         if user['_id'] in blocklist:
                             acc["skipped"] += 1
                             await update()
                             continue
-                    # --- end batch blocklist check ---
+                    # --- end atomic batch blocklist check ---
                     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                     headers = {"meeff-access-token": token["token"], "Connection": "keep-alive"}
                     async with session.get(url, headers=headers) as resp:
@@ -243,9 +267,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                             acc["exceeded"] = True
                             acc["running"] = False
                             await update(force=True)
-                            if session_temp:
-                                temporary = await update_temporary_blocklist(user_id, temporary, session_temp)
-                                session_temp.clear()
+                            await flush_shared_temp_to_db(user_id, temporary)
                             return
                         acc["added"] += 1
                         sent_since_last_filter_update += 1
@@ -261,9 +283,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                         await update()
                         await asyncio.sleep(speed)
                 await asyncio.sleep(speed)
-            if session_temp:
-                await update_temporary_blocklist(user_id, temporary, session_temp)
-                session_temp.clear()
+            await flush_shared_temp_to_db(user_id, temporary)
             await update(force=True)
 
     state["finalized"] = False
@@ -288,9 +308,10 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
     BLOCK_BATCH_SIZE = 20
     like_exceeded = False
     sent_since_last_filter_update = 0
+
     permanent = get_permanent_blocklist(user_id)
     temporary = get_temporary_blocklist(user_id)
-    session_temp = set()
+    batch_counter = 0
 
     async def update(force=False):
         nonlocal last_text, last_update_time
@@ -311,25 +332,24 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                 break
             for user in users:
                 if not state.get("running", True): break
-                # --- batch blocklist check ---
+                # --- atomic batch blocklist check ---
                 if is_blocklist_active(user_id):
-                    if (user['_id'] in permanent or
-                        user['_id'] in temporary or
-                        user['_id'] in session_temp):
+                    already_blocked = await atomic_batch_check_and_add(user_id, user['_id'], permanent, temporary)
+                    if already_blocked:
                         state["skipped_count"] += 1
                         await update()
                         continue
-                    session_temp.add(user['_id'])
-                    if len(session_temp) >= BLOCK_BATCH_SIZE:
-                        temporary = await update_temporary_blocklist(user_id, temporary, session_temp)
-                        session_temp.clear()
+                    batch_counter += 1
+                    if batch_counter >= BLOCK_BATCH_SIZE:
+                        temporary = await flush_shared_temp_to_db(user_id, temporary)
+                        batch_counter = 0
                 else:
-                    blocklist = permanent | temporary | session_temp
+                    blocklist = permanent | temporary | get_shared_temp(user_id)
                     if user['_id'] in blocklist:
                         state["skipped_count"] += 1
                         await update()
                         continue
-                # --- end batch blocklist check ---
+                # --- end atomic batch blocklist check ---
                 url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                 headers = {"meeff-access-token": token, "Connection": "keep-alive"}
                 async with session.get(url, headers=headers) as resp:
@@ -337,9 +357,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                     if data.get("errorCode") == "LikeExceeded":
                         like_exceeded = True
                         state["running"] = False
-                        if session_temp:
-                            temporary = await update_temporary_blocklist(user_id, temporary, session_temp)
-                            session_temp.clear()
+                        await flush_shared_temp_to_db(user_id, temporary)
                         break
                     state["total_added_friends"] += 1
                     sent_since_last_filter_update += 1
@@ -355,9 +373,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                     await update()
                     await asyncio.sleep(speed)
             await asyncio.sleep(speed)
-        if session_temp:
-            await update_temporary_blocklist(user_id, temporary, session_temp)
-            session_temp.clear()
+        await flush_shared_temp_to_db(user_id, temporary)
     end_time = datetime.now()
     state["finalized"] = True
     await safe_edit(
