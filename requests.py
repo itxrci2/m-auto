@@ -166,42 +166,42 @@ async def update_current_filter(user_id, token):
                 logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
 
 # ----------- ATOMIC SHARED MEMORY FOR BLOCKLIST ---------
-_blocklist_locks = {}
-_blocklist_shared_temp = {}
+_blocklist_state = {}  # user_id: {"permanent": set, "temporary": set, "lock": asyncio.Lock(), "shared_temp": set()}
 
-def get_blocklist_lock(user_id):
-    if user_id not in _blocklist_locks:
-        _blocklist_locks[user_id] = asyncio.Lock()
-    return _blocklist_locks[user_id]
+def get_blocklist_state(user_id):
+    if user_id not in _blocklist_state:
+        _blocklist_state[user_id] = {
+            "permanent": get_permanent_blocklist(user_id),
+            "temporary": get_temporary_blocklist(user_id),
+            "lock": asyncio.Lock(),
+            "shared_temp": set()
+        }
+    return _blocklist_state[user_id]
 
-def get_shared_temp(user_id):
-    if user_id not in _blocklist_shared_temp:
-        _blocklist_shared_temp[user_id] = set()
-    return _blocklist_shared_temp[user_id]
-
-async def atomic_batch_check_and_add(user_id, user_to_block, permanent, temporary):
-    lock = get_blocklist_lock(user_id)
-    shared_temp = get_shared_temp(user_id)
+async def atomic_batch_check_and_add(user_id, user_to_block):
+    state = get_blocklist_state(user_id)
+    lock = state["lock"]
     async with lock:
-        if (user_to_block in permanent or
-            user_to_block in temporary or
-            user_to_block in shared_temp):
+        if (user_to_block in state["permanent"] or
+            user_to_block in state["temporary"] or
+            user_to_block in state["shared_temp"]):
             return True
-        shared_temp.add(user_to_block)
+        state["shared_temp"].add(user_to_block)
         return False
 
-async def flush_shared_temp_to_db(user_id, original_temporary):
-    shared_temp = get_shared_temp(user_id)
-    if shared_temp:
-        merged = original_temporary | shared_temp
-        db.blocklists.update_one(
-            {"user_id": user_id},
-            {"$set": {"temporary": list(merged)}},
-            upsert=True
-        )
-        shared_temp.clear()
-        return merged
-    return original_temporary
+async def flush_shared_temp_to_db(user_id):
+    state = get_blocklist_state(user_id)
+    lock = state["lock"]
+    async with lock:
+        if state["shared_temp"]:
+            merged = state["temporary"] | state["shared_temp"]
+            db.blocklists.update_one(
+                {"user_id": user_id},
+                {"$set": {"temporary": list(merged)}},
+                upsert=True
+            )
+            state["temporary"] = merged
+            state["shared_temp"].clear()
 # --------------------------------------------------------
 
 async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
@@ -214,9 +214,6 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
     last_update_time = 0
     UPDATE_INTERVAL = 2
     BLOCK_BATCH_SIZE = 20
-
-    permanent = get_permanent_blocklist(user_id)
-    temporary = get_temporary_blocklist(user_id)
 
     async def update(force=False):
         nonlocal last_text, last_update_time
@@ -243,17 +240,18 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                     if not acc["running"] or not state.get("running", True): break
                     # --- atomic batch blocklist check ---
                     if is_blocklist_active(user_id):
-                        already_blocked = await atomic_batch_check_and_add(user_id, user['_id'], permanent, temporary)
+                        already_blocked = await atomic_batch_check_and_add(user_id, user['_id'])
                         if already_blocked:
                             acc["skipped"] += 1
                             await update()
                             continue
                         batch_counter += 1
                         if batch_counter >= BLOCK_BATCH_SIZE:
-                            temporary = await flush_shared_temp_to_db(user_id, temporary)
+                            await flush_shared_temp_to_db(user_id)
                             batch_counter = 0
                     else:
-                        blocklist = permanent | temporary | get_shared_temp(user_id)
+                        state_bl = get_blocklist_state(user_id)
+                        blocklist = state_bl["permanent"] | state_bl["temporary"] | state_bl["shared_temp"]
                         if user['_id'] in blocklist:
                             acc["skipped"] += 1
                             await update()
@@ -267,7 +265,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                             acc["exceeded"] = True
                             acc["running"] = False
                             await update(force=True)
-                            await flush_shared_temp_to_db(user_id, temporary)
+                            await flush_shared_temp_to_db(user_id)
                             return
                         acc["added"] += 1
                         sent_since_last_filter_update += 1
@@ -283,7 +281,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                         await update()
                         await asyncio.sleep(speed)
                 await asyncio.sleep(speed)
-            await flush_shared_temp_to_db(user_id, temporary)
+            await flush_shared_temp_to_db(user_id)
             await update(force=True)
 
     state["finalized"] = False
@@ -308,9 +306,6 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
     BLOCK_BATCH_SIZE = 20
     like_exceeded = False
     sent_since_last_filter_update = 0
-
-    permanent = get_permanent_blocklist(user_id)
-    temporary = get_temporary_blocklist(user_id)
     batch_counter = 0
 
     async def update(force=False):
@@ -334,17 +329,18 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                 if not state.get("running", True): break
                 # --- atomic batch blocklist check ---
                 if is_blocklist_active(user_id):
-                    already_blocked = await atomic_batch_check_and_add(user_id, user['_id'], permanent, temporary)
+                    already_blocked = await atomic_batch_check_and_add(user_id, user['_id'])
                     if already_blocked:
                         state["skipped_count"] += 1
                         await update()
                         continue
                     batch_counter += 1
                     if batch_counter >= BLOCK_BATCH_SIZE:
-                        temporary = await flush_shared_temp_to_db(user_id, temporary)
+                        await flush_shared_temp_to_db(user_id)
                         batch_counter = 0
                 else:
-                    blocklist = permanent | temporary | get_shared_temp(user_id)
+                    state_bl = get_blocklist_state(user_id)
+                    blocklist = state_bl["permanent"] | state_bl["temporary"] | state_bl["shared_temp"]
                     if user['_id'] in blocklist:
                         state["skipped_count"] += 1
                         await update()
@@ -357,7 +353,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                     if data.get("errorCode") == "LikeExceeded":
                         like_exceeded = True
                         state["running"] = False
-                        await flush_shared_temp_to_db(user_id, temporary)
+                        await flush_shared_temp_to_db(user_id)
                         break
                     state["total_added_friends"] += 1
                     sent_since_last_filter_update += 1
@@ -373,7 +369,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                     await update()
                     await asyncio.sleep(speed)
             await asyncio.sleep(speed)
-        await flush_shared_temp_to_db(user_id, temporary)
+        await flush_shared_temp_to_db(user_id)
     end_time = datetime.now()
     state["finalized"] = True
     await safe_edit(
