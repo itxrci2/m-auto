@@ -29,8 +29,8 @@ STOP_MARKUP = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 SPEED_LEVELS = {
-    "default": ("Default", 3.0),
-    "turbo": ("Turbo", 0.02)
+    "default": ("Default", 0.0),
+    "turbo": ("Turbo", 0.0),
 }
 
 def get_speed_markup(current_speed=None):
@@ -151,7 +151,7 @@ async def safe_edit(bot, chat_id, msg_id, text, markup=None):
 async def update_current_filter(user_id, token):
     filters = get_user_filters(user_id, token)
     if not filters:
-        return  # nothing to update
+        return
     headers = {
         'User-Agent': "okhttp/4.12.0",
         'Accept-Encoding': "gzip",
@@ -165,14 +165,14 @@ async def update_current_filter(user_id, token):
                 resp_text = await response.text()
                 logging.warning(f"Failed to update filter for auto-refresh. Response: {resp_text}")
 
-# ----------- ATOMIC SHARED MEMORY FOR BLOCKLIST ---------
-_blocklist_state = {}  # user_id: {"permanent": set, "temporary": set, "lock": asyncio.Lock(), "shared_temp": set()}
+# --- SUPER FAST ATOMIC IN-MEMORY SHARED BLOCKLIST ---
+_blocklist_state = {}
 
 def get_blocklist_state(user_id):
     if user_id not in _blocklist_state:
         _blocklist_state[user_id] = {
-            "permanent": get_permanent_blocklist(user_id),
-            "temporary": get_temporary_blocklist(user_id),
+            "permanent": set(get_permanent_blocklist(user_id)),
+            "temporary": set(get_temporary_blocklist(user_id)),
             "lock": asyncio.Lock(),
             "shared_temp": set()
         }
@@ -202,18 +202,18 @@ async def flush_shared_temp_to_db(user_id):
             )
             state["temporary"] = merged
             state["shared_temp"].clear()
-# --------------------------------------------------------
+# ----------------------------------------------------
 
 async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, speed):
     start_time = datetime.now()
-    accounts = [{"added":0, "skipped":0, "exceeded":False, "running":True} for _ in tokens]
+    accounts = [{"added": 0, "skipped": 0, "exceeded": False, "running": True} for _ in tokens]
     names = [tok.get("name", f"Account {i+1}") for i, tok in enumerate(tokens)]
     state["per_account"] = accounts
     state["account_names"] = names
     last_text = None
     last_update_time = 0
-    UPDATE_INTERVAL = 2
-    BLOCK_BATCH_SIZE = 20
+    UPDATE_INTERVAL = 1
+    BLOCK_BATCH_SIZE = 100
 
     async def update(force=False):
         nonlocal last_text, last_update_time
@@ -238,12 +238,10 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                     break
                 for user in users:
                     if not acc["running"] or not state.get("running", True): break
-                    # --- atomic batch blocklist check ---
                     if is_blocklist_active(user_id):
                         already_blocked = await atomic_batch_check_and_add(user_id, user['_id'])
                         if already_blocked:
                             acc["skipped"] += 1
-                            await update()
                             continue
                         batch_counter += 1
                         if batch_counter >= BLOCK_BATCH_SIZE:
@@ -254,9 +252,7 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                         blocklist = state_bl["permanent"] | state_bl["temporary"] | state_bl["shared_temp"]
                         if user['_id'] in blocklist:
                             acc["skipped"] += 1
-                            await update()
                             continue
-                    # --- end atomic batch blocklist check ---
                     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                     headers = {"meeff-access-token": token["token"], "Connection": "keep-alive"}
                     async with session.get(url, headers=headers) as resp:
@@ -264,23 +260,19 @@ async def run_requests_parallel(user_id, bot, tokens, status_message_id, state, 
                         if data.get("errorCode") == "LikeExceeded":
                             acc["exceeded"] = True
                             acc["running"] = False
-                            await update(force=True)
                             await flush_shared_temp_to_db(user_id)
+                            await update(force=True)
                             return
                         acc["added"] += 1
                         sent_since_last_filter_update += 1
-                        if sent_since_last_filter_update >= 7:
+                        if sent_since_last_filter_update >= 30:
                             sent_since_last_filter_update = 0
                             try:
                                 await update_current_filter(user_id, token["token"])
                             except Exception as e:
                                 logging.warning(f"Auto filter update failed: {e}")
-                        try:
-                            await bot.send_message(user_id, format_user(user), parse_mode="HTML")
-                        except: pass
                         await update()
-                        await asyncio.sleep(speed)
-                await asyncio.sleep(speed)
+                # No sleep here for max speed
             await flush_shared_temp_to_db(user_id)
             await update(force=True)
 
@@ -302,8 +294,8 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
     state["skipped_count"] = 0
     last_text = None
     last_update_time = 0
-    UPDATE_INTERVAL = 2
-    BLOCK_BATCH_SIZE = 20
+    UPDATE_INTERVAL = 1
+    BLOCK_BATCH_SIZE = 100
     like_exceeded = False
     sent_since_last_filter_update = 0
     batch_counter = 0
@@ -327,12 +319,10 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                 break
             for user in users:
                 if not state.get("running", True): break
-                # --- atomic batch blocklist check ---
                 if is_blocklist_active(user_id):
                     already_blocked = await atomic_batch_check_and_add(user_id, user['_id'])
                     if already_blocked:
                         state["skipped_count"] += 1
-                        await update()
                         continue
                     batch_counter += 1
                     if batch_counter >= BLOCK_BATCH_SIZE:
@@ -343,9 +333,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                     blocklist = state_bl["permanent"] | state_bl["temporary"] | state_bl["shared_temp"]
                     if user['_id'] in blocklist:
                         state["skipped_count"] += 1
-                        await update()
                         continue
-                # --- end atomic batch blocklist check ---
                 url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user['_id']}&isOkay=1"
                 headers = {"meeff-access-token": token, "Connection": "keep-alive"}
                 async with session.get(url, headers=headers) as resp:
@@ -357,18 +345,14 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
                         break
                     state["total_added_friends"] += 1
                     sent_since_last_filter_update += 1
-                    if sent_since_last_filter_update >= 7:
+                    if sent_since_last_filter_update >= 30:
                         sent_since_last_filter_update = 0
                         try:
                             await update_current_filter(user_id, token)
                         except Exception as e:
                             logging.warning(f"Auto filter update failed: {e}")
-                    try:
-                        await bot.send_message(user_id, format_user(user), parse_mode="HTML")
-                    except: pass
                     await update()
-                    await asyncio.sleep(speed)
-            await asyncio.sleep(speed)
+            # No sleep here for max speed
         await flush_shared_temp_to_db(user_id)
     end_time = datetime.now()
     state["finalized"] = True
@@ -384,7 +368,7 @@ async def run_requests_single(user_id, state, bot, token, account_name, speed):
         )
     )
 
-def run_requests(user_id, state, bot, get_current_account, account_name=None, speed=1.0):
+def run_requests(user_id, state, bot, get_current_account, account_name=None, speed=0.0):
     token = get_current_account(user_id)
     return run_requests_single(user_id, state, bot, token, account_name or "Current", speed)
 
@@ -392,9 +376,9 @@ async def handle_custom_speed_message(message, state, bot, get_tokens, get_curre
     user_id = message.from_user.id
     try:
         speed = float(message.text.strip())
-        if not (0.01 <= speed <= 30):
-            await message.reply("Please enter a value between 0.01 and 30 seconds. Send /cancel to abort.")
-            return  # Stay in awaiting mode
+        if not (0.0 <= speed <= 30):
+            await message.reply("Please enter a value between 0.0 and 30 seconds. Send /cancel to abort.")
+            return
         state.pop("awaiting_custom_speed", None)
         mode = state.pop("pending_speed_mode", None)
         if mode == "current":
@@ -429,7 +413,7 @@ async def handle_custom_speed_message(message, state, bot, get_tokens, get_curre
             state.update({"running": True, "finalized": False, "mode": "all"})
             status_msg = await message.answer(
                 format_progress(
-                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
+                    [{"added": 0, "skipped": 0, "exceeded": False} for _ in tokens],
                     [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
                 ),
                 reply_markup=STOP_MARKUP,
@@ -449,8 +433,8 @@ async def handle_custom_speed_message(message, state, bot, get_tokens, get_curre
             await message.reply("Speed selection not allowed here.")
         return
     except Exception:
-        await message.reply("Invalid speed value. Please send a number like 1.5 for 1.5 seconds. Send /cancel to abort.")
-        return  # Stay in awaiting mode
+        await message.reply("Invalid speed value. Please send a number like 0.0 for fastest. Send /cancel to abort.")
+        return
 
 async def handle_requests_callback(
     callback_query, state, bot, user_id, get_current_account, get_tokens, set_current_account, start_markup
@@ -498,7 +482,7 @@ async def handle_requests_callback(
 
     if data == "speed_custom":
         state["awaiting_custom_speed"] = True
-        await edit("Please send your custom speed in seconds (e.g., 2.0 for 2 seconds between requests):\nYou can /cancel to abort.", None)
+        await edit("Please send your custom speed in seconds (e.g., 0.0 for fastest):\nYou can /cancel to abort.", None)
         return True
 
     if data == "requests_cancel":
@@ -568,7 +552,7 @@ async def handle_requests_callback(
             state.update({"running": True, "finalized": False, "mode": "all"})
             status_msg = await callback_query.message.edit_text(
                 format_progress(
-                    [{"added":0, "skipped":0, "exceeded":False} for _ in tokens],
+                    [{"added": 0, "skipped": 0, "exceeded": False} for _ in tokens],
                     [tok.get('name', f'Account {i+1}') for i, tok in enumerate(tokens)]
                 ),
                 reply_markup=STOP_MARKUP,
