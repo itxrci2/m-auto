@@ -20,8 +20,8 @@ def get_gender_keyboard():
     return keyboard
 
 def get_age_keyboard():
-    # Ages 18–48 inclusive, split into rows of 8
-    ages = list(range(18, 49))  # 18 to 48 inclusive
+    # Ages 18–49 inclusive, split into rows of 8
+    ages = list(range(18, 50))  # 18 to 49 inclusive
     max_per_row = 8
     rows = []
     for i in range(0, len(ages), max_per_row):
