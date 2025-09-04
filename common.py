@@ -20,15 +20,15 @@ def get_gender_keyboard():
     return keyboard
 
 def get_age_keyboard():
-    # First row: 18–30
-    row1 = [InlineKeyboardButton(text=str(age), callback_data=f"filter_age_{age}") for age in range(18, 31)]
-    # Second row: 31–45
-    row2 = [InlineKeyboardButton(text=str(age), callback_data=f"filter_age_{age}") for age in range(31, 46)]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        row1,
-        row2,
-        [InlineKeyboardButton(text="Back", callback_data="filter_back")]
-    ])
+    # Telegram allows max 8 buttons per row. Arrange ages 18–45 accordingly.
+    ages = list(range(18, 46))  # 18 to 45 inclusive
+    rows = []
+    max_per_row = 8
+    for i in range(0, len(ages), max_per_row):
+        row = [InlineKeyboardButton(text=str(age), callback_data=f"filter_age_{age}") for age in ages[i:i+max_per_row]]
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="Back", callback_data="filter_back")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     return keyboard
 
 def get_nationality_keyboard():
@@ -36,7 +36,7 @@ def get_nationality_keyboard():
         ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
         ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
         ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"),
-        ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")
+        ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦")
     ]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="All Countries", callback_data="filter_nationality_all")],
