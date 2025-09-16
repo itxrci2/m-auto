@@ -1,5 +1,6 @@
 import aiohttp
 import json
+import itertools
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from db import set_token, get_tokens, set_info_card, get_info_card, set_user_filters, get_user_filters
 from requests import format_user
@@ -53,7 +54,8 @@ def format_user_with_nationality(user):
 SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(text="Sign Up", callback_data="signup_go"),
-        InlineKeyboardButton(text="Sign In", callback_data="signin_go")
+        InlineKeyboardButton(text="Sign In", callback_data="signin_go"),
+        InlineKeyboardButton(text="Mass Signup", callback_data="mass_signup_go"),
     ]
 ])
 VERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
@@ -78,7 +80,6 @@ DEFAULT_PHOTOS = (
     "https://meeffus.s3.amazonaws.com/profile/2025/06/16/20250616052438006_profile-1.0-349bf38c-4555-40cc-a322-e61afe15aa35.jpg"
 )
 
-# Default filter for new accounts
 DEFAULT_FILTER = {
     "filterGenderType": 5,
     "filterBirthYearFrom": 1995,
@@ -89,6 +90,24 @@ DEFAULT_FILTER = {
     "filterNationalityCode": "",
     "locale": "en"
 }
+
+def generate_gmail_dot_variants(email):
+    # johnsmith@gmail.com -> all possible dot variants (Gmail ignores dots)
+    # returns a set of variants
+    if '@' not in email:
+        return []
+    local, domain = email.lower().split('@', 1)
+    if domain != "gmail.com":
+        return [email]
+    positions = list(range(1, len(local)))
+    combos = []
+    for i in range(0, len(positions)+1):
+        for dots in itertools.combinations(positions, i):
+            s = list(local)
+            for offset, pos in enumerate(dots):
+                s.insert(pos + offset, '.')
+            combos.append("".join(s) + '@gmail.com')
+    return list(set(combos))
 
 async def check_email_exists(email):
     url = "https://api.meeff.com/user/checkEmail/v1"
@@ -122,19 +141,29 @@ async def signup_callback_handler(callback: CallbackQuery):
     state = user_signup_states.get(user_id, {"stage": "menu"})
     if callback.data == "signup_go":
         state["stage"] = "ask_email"
+        state["mass_signup"] = False
         user_signup_states[user_id] = state
         await callback.message.edit_text("Enter your email for registration:", reply_markup=BACK_TO_SIGNUP)
         await callback.answer()
         return True
     if callback.data == "signup_menu":
         state["stage"] = "menu"
+        state.pop("mass_signup", None)
         await callback.message.edit_text("Choose an option:", reply_markup=SIGNUP_MENU)
         await callback.answer()
         return True
     if callback.data == "signin_go":
         state["stage"] = "signin_email"
+        state["mass_signup"] = False
         user_signup_states[user_id] = state
         await callback.message.edit_text("Enter your email to sign in:", reply_markup=BACK_TO_SIGNUP)
+        await callback.answer()
+        return True
+    if callback.data == "mass_signup_go":
+        state["stage"] = "ask_mass_count"
+        state["mass_signup"] = True
+        user_signup_states[user_id] = state
+        await callback.message.edit_text("How many accounts do you want to create? (e.g., 10)", reply_markup=BACK_TO_SIGNUP)
         await callback.answer()
         return True
     if callback.data == "signup_verify":
@@ -181,21 +210,25 @@ async def signup_callback_handler(callback: CallbackQuery):
         await callback.answer()
         return True
     if callback.data == "signup_photos_done":
-        state["stage"] = "signup_submit"
-        processing_msg = await callback.message.edit_text("Registering your account, please wait...", reply_markup=None)
-        signup_result = await try_signup(state)
-        if signup_result.get("user", {}).get("_id"):
-            state["creds"] = {
-                "email": state["email"],
-                "password": state["password"],
-                "name": state["name"],
-            }
-            state["stage"] = "await_verify"
-            await processing_msg.edit_text("Account created! Please verify your email, then click the button below.", reply_markup=VERIFY_BUTTON)
+        if state.get("mass_signup"):
+            state["stage"] = "mass_ask_filters"
+            await callback.message.edit_text("Now configure filters for these accounts.\nSend filters as JSON, or type 'default' to use the default filter:", reply_markup=BACK_TO_SIGNUP)
         else:
-            err = signup_result.get("errorMessage", "Registration failed.")
-            state["stage"] = "menu"
-            await processing_msg.edit_text(f"Signup failed: {err}", reply_markup=SIGNUP_MENU)
+            state["stage"] = "signup_submit"
+            processing_msg = await callback.message.edit_text("Registering your account, please wait...", reply_markup=None)
+            signup_result = await try_signup(state)
+            if signup_result.get("user", {}).get("_id"):
+                state["creds"] = {
+                    "email": state["email"],
+                    "password": state["password"],
+                    "name": state["name"],
+                }
+                state["stage"] = "await_verify"
+                await processing_msg.edit_text("Account created! Please verify your email, then click the button below.", reply_markup=VERIFY_BUTTON)
+            else:
+                err = signup_result.get("errorMessage", "Registration failed.")
+                state["stage"] = "menu"
+                await processing_msg.edit_text(f"Signup failed: {err}", reply_markup=SIGNUP_MENU)
         return True
     return False
 
@@ -207,7 +240,155 @@ async def signup_message_handler(message: Message):
     if message.text and message.text.startswith("/"):
         return False
 
-    # SIGNUP FLOW
+    # --- MASS SIGNUP FLOW ---
+    if state.get("mass_signup"):
+        # Step 1: How many accounts
+        if state.get("stage") == "ask_mass_count":
+            try:
+                count = int(message.text.strip())
+                if not (2 <= count <= 50):
+                    await message.answer("Please enter a number between 2 and 50.")
+                    return True
+                state["mass_count"] = count
+                state["stage"] = "ask_mass_email"
+                await message.answer("Enter your base Gmail address (e.g. john.doe@gmail.com). Only Gmail is supported.", reply_markup=BACK_TO_SIGNUP)
+            except Exception:
+                await message.answer("Invalid number. Please try again.")
+            return True
+        # Step 2: Base Email
+        if state.get("stage") == "ask_mass_email":
+            email = message.text.strip().lower()
+            if not (email.endswith('@gmail.com') and '@' in email):
+                await message.answer("Only Gmail addresses are supported. Try again.")
+                return True
+            state["mass_email"] = email
+            state["stage"] = "finding_mass_emails"
+            await message.answer("Checking available emails, please wait...", reply_markup=None)
+
+            emails = generate_gmail_dot_variants(email)
+            available_emails = []
+            for eml in emails:
+                ok, _ = await check_email_exists(eml)
+                if ok:
+                    available_emails.append(eml)
+                    if len(available_emails) >= state["mass_count"]:
+                        break
+            if len(available_emails) < state["mass_count"]:
+                await message.answer(
+                    f"Only found {len(available_emails)} available emails. Please try a different base address or lower the count."
+                )
+                state["stage"] = "ask_mass_email"
+                return True
+            state["mass_emails"] = available_emails
+            state["mass_current"] = 0
+            await message.answer(
+                f"Found {len(available_emails)} available emails!\nNow enter a password for all accounts:",
+                reply_markup=BACK_TO_SIGNUP
+            )
+            state["stage"] = "mass_ask_password"
+            return True
+        if state.get("stage") == "mass_ask_password":
+            state["password"] = message.text.strip()
+            state["stage"] = "mass_ask_name"
+            await message.answer("Enter a display name for all accounts:", reply_markup=BACK_TO_SIGNUP)
+            return True
+        if state.get("stage") == "mass_ask_name":
+            state["name"] = message.text.strip()
+            state["stage"] = "mass_ask_gender"
+            await message.answer("Enter gender for all accounts (M/F):", reply_markup=BACK_TO_SIGNUP)
+            return True
+        if state.get("stage") == "mass_ask_gender":
+            gender = message.text.strip().upper()
+            if gender not in ("M", "F"):
+                await message.answer("Please enter M or F for gender:")
+                return True
+            state["gender"] = gender
+            state["stage"] = "mass_ask_desc"
+            await message.answer("Enter a profile description for all accounts:", reply_markup=BACK_TO_SIGNUP)
+            return True
+        if state.get("stage") == "mass_ask_desc":
+            state["desc"] = message.text.strip()
+            state["photos"] = []
+            state["stage"] = "mass_ask_photos"
+            await message.answer(
+                "Now send up to 6 profile pictures (shared by all accounts). Send each as a photo. When done, click 'Done' or send /done.",
+                reply_markup=DONE_PHOTOS
+            )
+            return True
+        if state.get("stage") == "mass_ask_photos":
+            if message.content_type == "photo":
+                if len(state["photos"]) >= 6:
+                    await message.answer("Already got 6 photos. Click Done or /done.")
+                    return True
+                photo = message.photo[-1]
+                file = await message.bot.get_file(photo.file_id)
+                file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(file_url) as resp:
+                        img_bytes = await resp.read()
+                img_url = await meeff_upload_image(img_bytes)
+                if img_url:
+                    state["photos"].append(img_url)
+                    await message.answer(f"Photo uploaded ({len(state['photos'])}/6).")
+                else:
+                    await message.answer("Failed to upload photo. Try again.")
+                if len(state["photos"]) == 6:
+                    await message.answer("You've uploaded 6 photos. Click Done or /done.", reply_markup=DONE_PHOTOS)
+                return True
+            elif message.text and message.text.strip().lower() == "/done":
+                state["stage"] = "mass_ask_filters"
+                await message.answer(
+                    "Now configure filters for these accounts.\nSend filters as JSON, or type 'default' to use the default filter:",
+                    reply_markup=BACK_TO_SIGNUP
+                )
+                return True
+            else:
+                await message.answer("Please send a photo or click Done.")
+                return True
+        if state.get("stage") == "mass_ask_filters":
+            if message.text.strip().lower() == "default":
+                state["filters"] = DEFAULT_FILTER
+            else:
+                try:
+                    state["filters"] = json.loads(message.text)
+                except Exception:
+                    await message.answer("Invalid JSON. Try again or send 'default'.")
+                    return True
+            state["stage"] = "mass_signup_submit"
+            await message.answer("Starting mass signup. Please wait, accounts are being created...")
+            results = []
+            for idx, eml in enumerate(state["mass_emails"]):
+                user_state = {
+                    "email": eml,
+                    "password": state["password"],
+                    "name": state["name"],
+                    "gender": state["gender"],
+                    "desc": state["desc"],
+                    "photos": state["photos"],
+                }
+                signup_result = await try_signup(user_state)
+                if signup_result.get("user", {}).get("_id"):
+                    access_token = None
+                    login_result = await try_signin(user_state["email"], user_state["password"])
+                    if login_result.get("accessToken"):
+                        access_token = login_result["accessToken"]
+                        set_token(user_id, access_token, user_state["name"], user_state["email"])
+                        set_user_filters(user_id, access_token, state["filters"])
+                        results.append((user_state["email"], "OK"))
+                    else:
+                        results.append((user_state["email"], "Signup OK, but signin failed"))
+                else:
+                    err = signup_result.get("errorMessage", "Registration failed.")
+                    results.append((user_state["email"], f"Signup failed: {err}"))
+            report = "\n".join([f"{eml}: {res}" for eml, res in results])
+            await message.answer(
+                f"Mass signup finished for {len(state['mass_emails'])} accounts!\n\n{report}",
+                reply_markup=SIGNUP_MENU
+            )
+            state.clear()
+            return True
+
+    # --- SINGLE SIGNUP FLOW ---
     if state.get("stage") == "ask_email":
         email = message.text.strip()
         ok, msg = await check_email_exists(email)
