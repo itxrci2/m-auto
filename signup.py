@@ -82,7 +82,7 @@ DEFAULT_PHOTOS = (
 DEFAULT_FILTER = {
     "filterGenderType": 5,
     "filterBirthYearFrom": 1995,
-    "filterBirthYearTo": 2006,
+    "filterBirthYearTo": 2007,
     "filterDistance": 510,
     "filterLanguageCodes": "",
     "filterNationalityBlock": 0,
