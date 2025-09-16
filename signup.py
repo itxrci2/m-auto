@@ -93,7 +93,6 @@ DEFAULT_FILTER = {
 
 def generate_gmail_dot_variants(email):
     # johnsmith@gmail.com -> all possible dot variants (Gmail ignores dots)
-    # returns a set of variants
     if '@' not in email:
         return []
     local, domain = email.lower().split('@', 1)
@@ -166,6 +165,83 @@ async def signup_callback_handler(callback: CallbackQuery):
         await callback.message.edit_text("How many accounts do you want to create? (e.g., 10)", reply_markup=BACK_TO_SIGNUP)
         await callback.answer()
         return True
+
+    # --- MASS SIGNUP VERIFICATION FLOW ---
+    if callback.data == "mass_verify_all":
+        not_verified = []
+        verified = []
+        for account in state.get("mass_accounts", []):
+            if account.get("signup_failed"):
+                continue
+            email = account["email"]
+            password = account["password"]
+            login_result = await try_signin(email, password)
+            if login_result.get("accessToken"):
+                access_token = login_result["accessToken"]
+                set_token(user_id, access_token, account["name"], email)
+                set_user_filters(user_id, access_token, account["filters"])
+                verified.append(email)
+            elif login_result.get("errorCode") in ("NotVerified", "EmailVerificationRequired"):
+                not_verified.append(email)
+            else:
+                not_verified.append(email+" (login failed)")
+        if not_verified:
+            state["mass_not_verified"] = not_verified
+            await callback.message.edit_text(
+                f"These accounts are not verified yet:\n" +
+                "\n".join(not_verified) +
+                "\n\nPlease check your email inbox for these addresses and verify them. " +
+                "You can click 'Resend All' to resend verification emails for non-verified accounts, then click 'Verify All' again after verifying.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Resend All", callback_data="mass_resend_all")],
+                        [InlineKeyboardButton(text="Verify All", callback_data="mass_verify_all")],
+                        [InlineKeyboardButton(text="Back to Menu", callback_data="signup_menu")]
+                    ]
+                )
+            )
+        else:
+            await callback.message.edit_text(
+                f"All {len([a for a in state['mass_accounts'] if not a.get('signup_failed')])} accounts have been verified and logged in!\n\n" +
+                "\n".join(verified),
+                reply_markup=SIGNUP_MENU
+            )
+            state.clear()
+        await callback.answer()
+        return True
+
+    if callback.data == "mass_resend_all":
+        not_verified = state.get("mass_not_verified", [])
+        resend_results = []
+        for account in state.get("mass_accounts", []):
+            if account.get("signup_failed"):
+                continue
+            if account["email"] not in not_verified:
+                continue
+            login_result = await try_signin(account["email"], account["password"])
+            access_token = login_result.get("accessToken")
+            if access_token:
+                resend_result = await resend_verification_email(access_token)
+                if resend_result.get("errorCode") in ("", None):
+                    resend_results.append(f"{account['email']}: Resend OK")
+                else:
+                    resend_results.append(f"{account['email']}: {resend_result.get('errorMessage', 'Unknown error')}")
+            else:
+                resend_results.append(f"{account['email']}: Cannot login to resend")
+        await callback.message.edit_text(
+            "Verification emails have been resent where possible:\n" +
+            "\n".join(resend_results) +
+            "\n\nNow verify in your inbox, then click 'Verify All' again.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="Verify All", callback_data="mass_verify_all")],
+                    [InlineKeyboardButton(text="Back to Menu", callback_data="signup_menu")]
+                ]
+            )
+        )
+        await callback.answer()
+        return True
+
     if callback.data == "signup_verify":
         creds = state.get("creds")
         if not creds:
@@ -211,8 +287,8 @@ async def signup_callback_handler(callback: CallbackQuery):
         return True
     if callback.data == "signup_photos_done":
         if state.get("mass_signup"):
-            state["stage"] = "mass_ask_filters"
-            await callback.message.edit_text("Now configure filters for these accounts.\nSend filters as JSON, or type 'default' to use the default filter:", reply_markup=BACK_TO_SIGNUP)
+            state["stage"] = "mass_ask_country"
+            await callback.message.edit_text("Enter a country code for all accounts (e.g. US, UK, RU):", reply_markup=BACK_TO_SIGNUP)
         else:
             state["stage"] = "signup_submit"
             processing_msg = await callback.message.edit_text("Registering your account, please wait...", reply_markup=None)
@@ -336,56 +412,94 @@ async def signup_message_handler(message: Message):
                     await message.answer("You've uploaded 6 photos. Click Done or /done.", reply_markup=DONE_PHOTOS)
                 return True
             elif message.text and message.text.strip().lower() == "/done":
-                state["stage"] = "mass_ask_filters"
+                state["stage"] = "mass_ask_country"
                 await message.answer(
-                    "Now configure filters for these accounts.\nSend filters as JSON, or type 'default' to use the default filter:",
+                    "Enter a country code for all accounts (e.g. US, UK, RU):",
                     reply_markup=BACK_TO_SIGNUP
                 )
                 return True
             else:
                 await message.answer("Please send a photo or click Done.")
                 return True
-        if state.get("stage") == "mass_ask_filters":
-            if message.text.strip().lower() == "default":
-                state["filters"] = DEFAULT_FILTER
-            else:
-                try:
-                    state["filters"] = json.loads(message.text)
-                except Exception:
-                    await message.answer("Invalid JSON. Try again or send 'default'.")
-                    return True
-            state["stage"] = "mass_signup_submit"
-            await message.answer("Starting mass signup. Please wait, accounts are being created...")
-            results = []
-            for idx, eml in enumerate(state["mass_emails"]):
-                user_state = {
-                    "email": eml,
-                    "password": state["password"],
-                    "name": state["name"],
-                    "gender": state["gender"],
-                    "desc": state["desc"],
-                    "photos": state["photos"],
-                }
-                signup_result = await try_signup(user_state)
-                if signup_result.get("user", {}).get("_id"):
-                    access_token = None
-                    login_result = await try_signin(user_state["email"], user_state["password"])
-                    if login_result.get("accessToken"):
-                        access_token = login_result["accessToken"]
-                        set_token(user_id, access_token, user_state["name"], user_state["email"])
-                        set_user_filters(user_id, access_token, state["filters"])
-                        results.append((user_state["email"], "OK"))
+
+        # --- FILTER STEPS ---
+        if state.get("stage") == "mass_ask_country":
+            cc = message.text.strip().upper()
+            if not (2 <= len(cc) <= 3): # crude ISO code check
+                await message.answer("Please enter a valid 2- or 3-letter country code (e.g. US, UK, RU):")
+                return True
+            state["mass_filter_country"] = cc
+            state["stage"] = "mass_ask_age_from"
+            await message.answer("Enter minimum age (e.g. 18):", reply_markup=BACK_TO_SIGNUP)
+            return True
+        if state.get("stage") == "mass_ask_age_from":
+            try:
+                min_age = int(message.text.strip())
+                if not (14 <= min_age <= 99):
+                    raise Exception()
+                state["mass_filter_min_age"] = min_age
+                state["stage"] = "mass_ask_age_to"
+                await message.answer("Enter maximum age (e.g. 35):", reply_markup=BACK_TO_SIGNUP)
+            except Exception:
+                await message.answer("Please enter a valid minimum age (14-99):")
+            return True
+        if state.get("stage") == "mass_ask_age_to":
+            try:
+                max_age = int(message.text.strip())
+                min_age = state["mass_filter_min_age"]
+                if not (min_age <= max_age <= 99):
+                    raise Exception()
+                state["mass_filter_max_age"] = max_age
+                # Prepare mass filters for all accounts
+                year = 2025  # use current year, adjust if needed
+                filter_obj = dict(DEFAULT_FILTER)
+                filter_obj["filterNationalityCode"] = state["mass_filter_country"]
+                filter_obj["filterBirthYearFrom"] = year - state["mass_filter_max_age"]
+                filter_obj["filterBirthYearTo"] = year - state["mass_filter_min_age"]
+                state["mass_filter_obj"] = filter_obj
+                state["stage"] = "mass_signup_submit"
+                await message.answer("Starting mass signup. Please wait, accounts are being created...")
+                # Now do the mass signup
+                mass_accounts = []
+                for eml in state["mass_emails"]:
+                    user_state = {
+                        "email": eml,
+                        "password": state["password"],
+                        "name": state["name"],
+                        "gender": state["gender"],
+                        "desc": state["desc"],
+                        "photos": state["photos"],
+                        "filters": filter_obj
+                    }
+                    signup_result = await try_signup(user_state)
+                    if signup_result.get("user", {}).get("_id"):
+                        mass_accounts.append(user_state)
                     else:
-                        results.append((user_state["email"], "Signup OK, but signin failed"))
-                else:
-                    err = signup_result.get("errorMessage", "Registration failed.")
-                    results.append((user_state["email"], f"Signup failed: {err}"))
-            report = "\n".join([f"{eml}: {res}" for eml, res in results])
-            await message.answer(
-                f"Mass signup finished for {len(state['mass_emails'])} accounts!\n\n{report}",
-                reply_markup=SIGNUP_MENU
-            )
-            state.clear()
+                        mass_accounts.append(dict(user_state, signup_failed=True, error=signup_result.get("errorMessage", "Registration failed.")))
+                state["mass_accounts"] = mass_accounts
+                # Show verify step
+                created = [u["email"] for u in mass_accounts if not u.get("signup_failed")]
+                failed = [f"{u['email']}: {u.get('error')}" for u in mass_accounts if u.get("signup_failed")]
+                msg = (
+                    f"Accounts created: {len(created)}\n\n" +
+                    "These accounts were created:\n" +
+                    "\n".join(created) +
+                    ("\n\nFailed to create:\n" + "\n".join(failed) if failed else "") +
+                    "\n\nPlease verify each account by clicking the verification link sent to your email inboxes. " +
+                    "When you have done so, click 'Verify All'."
+                )
+                await message.answer(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="Verify All", callback_data="mass_verify_all")],
+                            [InlineKeyboardButton(text="Back to Menu", callback_data="signup_menu")]
+                        ]
+                    )
+                )
+                state["stage"] = "mass_verify"
+            except Exception:
+                await message.answer("Please enter a valid maximum age (must be at least minimum age and <= 99):")
             return True
 
     # --- SINGLE SIGNUP FLOW ---
