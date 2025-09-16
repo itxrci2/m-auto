@@ -92,7 +92,6 @@ DEFAULT_FILTER = {
 }
 
 def generate_gmail_dot_variants(email):
-    # johnsmith@gmail.com -> all possible dot variants (Gmail ignores dots)
     if '@' not in email:
         return []
     local, domain = email.lower().split('@', 1)
@@ -170,6 +169,7 @@ async def signup_callback_handler(callback: CallbackQuery):
     if callback.data == "mass_verify_all":
         not_verified = []
         verified = []
+        verified_infos = []
         for account in state.get("mass_accounts", []):
             if account.get("signup_failed"):
                 continue
@@ -180,6 +180,14 @@ async def signup_callback_handler(callback: CallbackQuery):
                 access_token = login_result["accessToken"]
                 set_token(user_id, access_token, account["name"], email)
                 set_user_filters(user_id, access_token, account["filters"])
+                user_data = login_result.get("user")
+                if user_data:
+                    user_data["email"] = email
+                    user_data["password"] = password
+                    user_data["token"] = access_token
+                    info_card = format_user_with_nationality(user_data)
+                    set_info_card(user_id, access_token, info_card, email)
+                    verified_infos.append(info_card)
                 verified.append(email)
             elif login_result.get("errorCode") in ("NotVerified", "EmailVerificationRequired"):
                 not_verified.append(email)
@@ -201,9 +209,14 @@ async def signup_callback_handler(callback: CallbackQuery):
                 )
             )
         else:
-            await callback.message.edit_text(
-                f"All {len([a for a in state['mass_accounts'] if not a.get('signup_failed')])} accounts have been verified and logged in!\n\n" +
-                "\n".join(verified),
+            summary = (
+                f"All {len(verified)} accounts have been verified, logged in, and saved!\n"
+                "Here are their info cards:\n\n"
+            )
+            for card in verified_infos:
+                await callback.message.answer(card, parse_mode="HTML", disable_web_page_preview=False)
+            await callback.message.answer(
+                summary + "All done! You can now use these accounts.",
                 reply_markup=SIGNUP_MENU
             )
             state.clear()
@@ -318,7 +331,6 @@ async def signup_message_handler(message: Message):
 
     # --- MASS SIGNUP FLOW ---
     if state.get("mass_signup"):
-        # Step 1: How many accounts
         if state.get("stage") == "ask_mass_count":
             try:
                 count = int(message.text.strip())
@@ -331,7 +343,6 @@ async def signup_message_handler(message: Message):
             except Exception:
                 await message.answer("Invalid number. Please try again.")
             return True
-        # Step 2: Base Email
         if state.get("stage") == "ask_mass_email":
             email = message.text.strip().lower()
             if not (email.endswith('@gmail.com') and '@' in email):
@@ -422,10 +433,9 @@ async def signup_message_handler(message: Message):
                 await message.answer("Please send a photo or click Done.")
                 return True
 
-        # --- FILTER STEPS ---
         if state.get("stage") == "mass_ask_country":
             cc = message.text.strip().upper()
-            if not (2 <= len(cc) <= 3): # crude ISO code check
+            if not (2 <= len(cc) <= 3):
                 await message.answer("Please enter a valid 2- or 3-letter country code (e.g. US, UK, RU):")
                 return True
             state["mass_filter_country"] = cc
@@ -450,8 +460,7 @@ async def signup_message_handler(message: Message):
                 if not (min_age <= max_age <= 99):
                     raise Exception()
                 state["mass_filter_max_age"] = max_age
-                # Prepare mass filters for all accounts
-                year = 2025  # use current year, adjust if needed
+                year = 2025
                 filter_obj = dict(DEFAULT_FILTER)
                 filter_obj["filterNationalityCode"] = state["mass_filter_country"]
                 filter_obj["filterBirthYearFrom"] = year - state["mass_filter_max_age"]
@@ -459,7 +468,6 @@ async def signup_message_handler(message: Message):
                 state["mass_filter_obj"] = filter_obj
                 state["stage"] = "mass_signup_submit"
                 await message.answer("Starting mass signup. Please wait, accounts are being created...")
-                # Now do the mass signup
                 mass_accounts = []
                 for eml in state["mass_emails"]:
                     user_state = {
@@ -469,7 +477,7 @@ async def signup_message_handler(message: Message):
                         "gender": state["gender"],
                         "desc": state["desc"],
                         "photos": state["photos"],
-                        "filters": filter_obj
+                        "filters": filter_obj.copy()
                     }
                     signup_result = await try_signup(user_state)
                     if signup_result.get("user", {}).get("_id"):
@@ -477,7 +485,6 @@ async def signup_message_handler(message: Message):
                     else:
                         mass_accounts.append(dict(user_state, signup_failed=True, error=signup_result.get("errorMessage", "Registration failed.")))
                 state["mass_accounts"] = mass_accounts
-                # Show verify step
                 created = [u["email"] for u in mass_accounts if not u.get("signup_failed")]
                 failed = [f"{u['email']}: {u.get('error')}" for u in mass_accounts if u.get("signup_failed")]
                 msg = (
@@ -593,7 +600,6 @@ async def signup_message_handler(message: Message):
         processing_msg = await message.answer("Signing in, please wait...", reply_markup=None)
         login_result = await try_signin(email, password)
         if login_result.get("accessToken"):
-            # Always save creds in state, even if not verified!
             state["creds"] = {"email": email, "password": password}
             creds = state["creds"]
             await store_token_and_show_card(processing_msg, login_result, creds)
@@ -740,7 +746,6 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
         tokens = get_tokens(user_id)
         account_name = user_data.get("name") if user_data else creds.get("email")
         set_token(user_id, access_token, account_name, email)
-        # --- Set default filter for new accounts ---
         if not get_user_filters(user_id, access_token):
             set_user_filters(user_id, access_token, DEFAULT_FILTER)
         if user_data:
@@ -751,7 +756,6 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
             set_info_card(user_id, access_token, text, email)
             await msg_obj.edit_text("Account signed in and saved!\n" + text, parse_mode="HTML")
         else:
-            # Show resend button if not verified (no user info)
             await msg_obj.edit_text(
                 "Account signed in and saved! (Email not verified, info not available yet.)\n"
                 "Please verify your email, or click below to resend the verification email.",
