@@ -1,7 +1,7 @@
 import aiohttp
 import json
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from db import set_token, get_tokens, set_info_card, get_info_card
+from db import set_token, get_tokens, set_info_card, get_info_card, set_user_filters, get_user_filters
 from requests import format_user
 from device_info import random_device_info
 
@@ -66,6 +66,10 @@ DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Done", callback_data="signup_photos_done")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
+RESEND_EMAIL_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Resend Verification Email", callback_data="resend_email_verification")],
+    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
+])
 
 user_signup_states = {}
 
@@ -73,6 +77,18 @@ DEFAULT_PHOTOS = (
     "https://meeffus.s3.amazonaws.com/profile/2025/06/16/20250616052423006_profile-1.0-bd262b27-1916-4bd3-9f1d-0e7fdba35268.jpg|"
     "https://meeffus.s3.amazonaws.com/profile/2025/06/16/20250616052438006_profile-1.0-349bf38c-4555-40cc-a322-e61afe15aa35.jpg"
 )
+
+# Default filter for new accounts
+DEFAULT_FILTER = {
+    "filterGenderType": 5,
+    "filterBirthYearFrom": 1995,
+    "filterBirthYearTo": 2006,
+    "filterDistance": 510,
+    "filterLanguageCodes": "",
+    "filterNationalityBlock": 0,
+    "filterNationalityCode": "",
+    "locale": "en"
+}
 
 async def check_email_exists(email):
     url = "https://api.meeff.com/user/checkEmail/v1"
@@ -132,10 +148,37 @@ async def signup_callback_handler(callback: CallbackQuery):
         login_result = await try_signin(creds['email'], creds['password'])
         if login_result.get("accessToken"):
             await store_token_and_show_card(callback.message, login_result, creds)
-        elif login_result.get("errorCode") == "NotVerified":
-            await callback.message.edit_text("Email not verified! Please check your inbox and click the link, then try Verify again.", reply_markup=VERIFY_BUTTON)
+        elif login_result.get("errorCode") in ("NotVerified", "EmailVerificationRequired"):
+            await callback.message.edit_text(
+                "Email not verified! Please check your inbox and click the link, then try Verify again.\n"
+                "Or click the button below to resend the verification email.",
+                reply_markup=RESEND_EMAIL_BUTTON
+            )
         else:
             await callback.message.edit_text(f"Login failed: {login_result.get('errorMessage', 'Unknown error')}", reply_markup=SIGNUP_MENU)
+        return True
+    if callback.data == "resend_email_verification":
+        creds = state.get("creds")
+        if not creds or not creds.get("email") or not creds.get("password"):
+            await callback.answer("No signup info. Please sign up again.", show_alert=True)
+            return True
+        login_result = await try_signin(creds['email'], creds['password'])
+        access_token = login_result.get("accessToken")
+        if not access_token:
+            await callback.answer("Token not available. Try signing up again.", show_alert=True)
+            return True
+        resend_result = await resend_verification_email(access_token)
+        if (resend_result.get("errorCode") == "" or resend_result.get("errorCode") is None):
+            await callback.message.edit_text(
+                "Verification email resent! Please check your inbox and verify your email.",
+                reply_markup=VERIFY_BUTTON
+            )
+        else:
+            await callback.message.edit_text(
+                f"Failed to resend verification email: {resend_result.get('errorMessage', 'Unknown error')}",
+                reply_markup=RESEND_EMAIL_BUTTON
+            )
+        await callback.answer()
         return True
     if callback.data == "signup_photos_done":
         state["stage"] = "signup_submit"
@@ -255,7 +298,9 @@ async def signup_message_handler(message: Message):
         processing_msg = await message.answer("Signing in, please wait...", reply_markup=None)
         login_result = await try_signin(email, password)
         if login_result.get("accessToken"):
-            creds = {"email": email, "password": password}
+            # Always save creds in state, even if not verified!
+            state["creds"] = {"email": email, "password": password}
+            creds = state["creds"]
             await store_token_and_show_card(processing_msg, login_result, creds)
             state["stage"] = "menu"
         else:
@@ -374,6 +419,23 @@ async def try_signin(email, password):
         async with session.post(url, json=payload, headers=headers) as resp:
             return await resp.json()
 
+async def resend_verification_email(access_token):
+    url = "https://api.meeff.com/user/resendEmailVerification/v1"
+    payload = {"locale": "en"}
+    headers = {
+        'User-Agent': "okhttp/5.1.0",
+        'Accept-Encoding': "gzip",
+        'Content-Type': "application/json",
+        'meeff-access-token': access_token,
+        'content-type': "application/json; charset=utf-8"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            try:
+                return await resp.json()
+            except Exception:
+                return {"errorCode": "unknown", "errorMessage": "No response."}
+
 async def store_token_and_show_card(msg_obj, login_result, creds):
     access_token = login_result.get("accessToken")
     user_data = login_result.get("user")
@@ -383,6 +445,9 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
         tokens = get_tokens(user_id)
         account_name = user_data.get("name") if user_data else creds.get("email")
         set_token(user_id, access_token, account_name, email)
+        # --- Set default filter for new accounts ---
+        if not get_user_filters(user_id, access_token):
+            set_user_filters(user_id, access_token, DEFAULT_FILTER)
         if user_data:
             user_data["email"] = creds.get("email")
             user_data["password"] = creds.get("password")
@@ -391,6 +456,11 @@ async def store_token_and_show_card(msg_obj, login_result, creds):
             set_info_card(user_id, access_token, text, email)
             await msg_obj.edit_text("Account signed in and saved!\n" + text, parse_mode="HTML")
         else:
-            await msg_obj.edit_text("Account signed in and saved! (Email not verified, info not available yet.)")
+            # Show resend button if not verified (no user info)
+            await msg_obj.edit_text(
+                "Account signed in and saved! (Email not verified, info not available yet.)\n"
+                "Please verify your email, or click below to resend the verification email.",
+                reply_markup=RESEND_EMAIL_BUTTON
+            )
     else:
         await msg_obj.edit_text("Token not received, failed to save account.")
